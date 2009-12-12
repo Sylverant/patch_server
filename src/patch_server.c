@@ -55,11 +55,10 @@
 
 #define VERSION "0.1.0"
 
-/* The offset from the defined server port to install our patch/data server
-   sockets. */
-#define PATCH_PORT_OFFSET -2000
-#define DATA_PORT_OFFSET -1999
-#define WEB_PORT_OFFSET -1998
+/* The ports to listen on. */
+#define PC_PATCH_PORT 10000
+#define PC_DATA_PORT  10001
+#define WEB_PORT      10002
 
 static sylverant_config_t cfg;
 
@@ -142,17 +141,6 @@ static void destroy_connection(patch_client_t *c) {
     free(c);
 
     --client_count;
-}
-
-/* Make the given file descriptor do non-blocking I/O. */
-static int make_nonblocking(int fd) {
-    int flags;
-
-    if((flags = fcntl(fd, F_GETFL, 0)) < 0) {
-        return flags;
-    }
-
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 /* Send the patch packets needed to change the client's current directory to the
@@ -511,10 +499,6 @@ static void load_config() {
         cfg.override_ip = cfg.server_ip;
     }
 
-    debug(DBG_LOG, "Patch port: %d\n", cfg.server_port + PATCH_PORT_OFFSET);
-    debug(DBG_LOG, "Data port: %d\n", cfg.server_port + DATA_PORT_OFFSET);
-    debug(DBG_LOG, "Web Polling port: %d\n", cfg.server_port + WEB_PORT_OFFSET);
-
     if(cfg.patch.maxconn) {
         debug(DBG_LOG, "Max number of connections: %d\n", cfg.patch.maxconn);
     }
@@ -626,8 +610,7 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
                 tmp = cfg.override_ip;
             }
 
-            if(send_redirect(c, tmp,
-                             htons(cfg.server_port + DATA_PORT_OFFSET))) {
+            if(send_redirect(c, tmp, htons(PC_DATA_PORT))) {
                 return -2;
             }
 
@@ -786,32 +769,26 @@ static void handle_connections() {
     int patch_sock, data_sock, web_sock, sock;
     struct sockaddr_in addr;
     socklen_t alen = sizeof(struct sockaddr_in);
-    fd_set read, except, write;
+    fd_set readfds, writefds;
     int nfds = 0;
     struct timeval timeout;
     patch_client_t *i, *tmp;
     ssize_t sent;
 
-    /* Create the 3 sockets (and make them non-blocking, note that the sockets
-       created by the clients are still blocking, so that we can use select to
-       efficiently sleep while waiting for data). */
+    /* Create the 3 sockets that we'll listen on. */
     patch_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     data_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     web_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    if(patch_sock < 0 || data_sock < 0) {
+    if(patch_sock < 0 || data_sock < 0 || web_sock < 0) {
         perror("socket");
         exit(1);
     }
 
-    make_nonblocking(patch_sock);
-    make_nonblocking(data_sock);
-    make_nonblocking(web_sock);
-
     /* Bind the three sockets to the appropriate ports. */
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = cfg.server_ip;
-    addr.sin_port = htons(cfg.server_port + PATCH_PORT_OFFSET);
+    addr.sin_port = htons(PC_PATCH_PORT);
     memset(addr.sin_zero, 0, sizeof(addr.sin_zero));
 
     if(bind(patch_sock, (struct sockaddr *)&addr, alen)) {
@@ -819,14 +796,14 @@ static void handle_connections() {
         exit(1);
     }
 
-    addr.sin_port = htons(cfg.server_port + DATA_PORT_OFFSET);
+    addr.sin_port = htons(PC_DATA_PORT);
 
     if(bind(data_sock, (struct sockaddr *)&addr, alen)) {
         perror("bind");
         exit(1);
     }
 
-    addr.sin_port = htons(cfg.server_port + WEB_PORT_OFFSET);
+    addr.sin_port = htons(WEB_PORT);
 
     if(bind(web_sock, (struct sockaddr *)&addr, alen)) {
         perror("bind");
@@ -850,89 +827,99 @@ static void handle_connections() {
     }
     
     for(;;) {
-        /* Check for connections to the patch port. */
-        if((sock = accept(patch_sock, (struct sockaddr *)&addr, &alen)) < 0 &&
-           errno != EAGAIN) {
-            perror("accept");
-            exit(1);
-        }
-
-        if(sock > 0) {
-            if(create_connection(sock, addr.sin_addr.s_addr, 0) == NULL) {
-                close(sock);
-            }
-
-            debug(DBG_LOG, "Accepted patch connection from %s\n",
-                  inet_ntoa(addr.sin_addr));
-        }
-
-        /* Check for connections to the data port. */
-        if((sock = accept(data_sock, (struct sockaddr *)&addr, &alen)) < 0 &&
-           errno != EAGAIN) {
-            perror("accept");
-            exit(1);
-        }
-
-        if(sock > 0) {
-            if(create_connection(sock, addr.sin_addr.s_addr, 1) == NULL) {
-                close(sock);
-            }
-
-            debug(DBG_LOG, "Accepted data connection from %s\n",
-                  inet_ntoa(addr.sin_addr));
-        }
-
-        /* Check for connections to the web port. */
-        if((sock = accept(web_sock, (struct sockaddr *)&addr, &alen)) < 0 &&
-           errno != EAGAIN) {
-            perror("accept");
-            exit(1);
-        }
-
-        if(sock > 0) {
-            debug(DBG_LOG, "Accepted web connection from %s\n",
-                  inet_ntoa(addr.sin_addr));
-
-            /* Send the number of connected clients, and close the socket. */
-            nfds = LE32(client_count);
-            send(sock, &nfds, 4, 0);
-            close(sock);
-        }
-
         /* Clear out the fd_sets and set the timeout value for select. */
-        FD_ZERO(&read);
-        FD_ZERO(&except);
+        FD_ZERO(&readfds);
+        FD_ZERO(&writefds);
         nfds = 0;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 2000;
+        timeout.tv_sec = 9001;
+        timeout.tv_usec = 0;
 
         /* Fill the sockets into the fd_set so we can use select below. */
         TAILQ_FOREACH(i, &clients, qentry) {
-            FD_SET(i->sock, &read);
-            FD_SET(i->sock, &except);
-            FD_SET(i->sock, &write);
+            FD_SET(i->sock, &readfds);
+
+            /* Only add to the write fd_set if we have something to send. */
+            if(i->sendbuf_cur) {
+                FD_SET(i->sock, &writefds);
+            }
+
             nfds = nfds > i->sock ? nfds : i->sock;
         }
 
-        /* Wait to see if we get any incoming data. */
-        if(select(nfds + 1, &read, &write, &except, &timeout) > 0) {
-            TAILQ_FOREACH(i, &clients, qentry) {
-                /* Make sure there wasn't some kind of error with this
-                   connection. */
-                if(FD_ISSET(i->sock, &except)) {
-                    debug(DBG_WARN, "Error with connection!\n");
-                    i->disconnected = 1;
-                }
+        /* Add the listening sockets to the read fd_set. */
+        FD_SET(patch_sock, &readfds);
+        nfds = nfds > patch_sock ? nfds : patch_sock;
+        FD_SET(data_sock, &readfds);
+        nfds = nfds > data_sock ? nfds : data_sock;
+        FD_SET(web_sock, &readfds);
+        nfds = nfds > web_sock ? nfds : web_sock;
 
+        /* Wait to see if we get any incoming data. */
+        if(select(nfds + 1, &readfds, &writefds, NULL, &timeout) > 0) {
+            /* Check the listening sockets first. */
+            if(FD_ISSET(patch_sock, &readfds)) {
+                alen = sizeof(struct sockaddr_in);
+
+                if((sock = accept(patch_sock, (struct sockaddr *)&addr,
+                                  &alen)) < 0) {
+                    perror("accept");
+                }
+                else {
+                    if(!create_connection(sock, addr.sin_addr.s_addr, 0)) {
+                        close(sock);
+                    }
+
+                    debug(DBG_LOG, "Accepted patch connection from %s\n",
+                          inet_ntoa(addr.sin_addr));
+                }
+            }
+
+            if(FD_ISSET(data_sock, &readfds)) {
+                alen = sizeof(struct sockaddr_in);
+
+                if((sock = accept(data_sock, (struct sockaddr *)&addr,
+                                  &alen)) < 0) {
+                    perror("accept");
+                }
+                else {
+                    if(!create_connection(sock, addr.sin_addr.s_addr,1)) {
+                        close(sock);
+                    }
+
+                    debug(DBG_LOG, "Accepted data connection from %s\n",
+                          inet_ntoa(addr.sin_addr));
+                }
+            }
+
+            if(FD_ISSET(web_sock, &readfds)) {
+                alen = sizeof(struct sockaddr_in);
+
+                if((sock = accept(web_sock, (struct sockaddr *)&addr,
+                                  &alen)) < 0) {
+                    perror("accept");
+                }
+                else {
+                    debug(DBG_LOG, "Accepted web connection from %s\n",
+                          inet_ntoa(addr.sin_addr));
+
+                    /* Send the number of connected clients, and close the
+                       socket. */
+                    nfds = LE32(client_count);
+                    send(sock, &nfds, 4, 0);
+                    close(sock);
+                }
+            }
+
+            TAILQ_FOREACH(i, &clients, qentry) {
                 /* Check if this connection was trying to send us something. */
-                if(FD_ISSET(i->sock, &read)) {
+                if(FD_ISSET(i->sock, &readfds)) {
                     if(read_from_client(i)) {
                         i->disconnected = 1;
                     }
                 }
 
                 /* If we have anything to write, check if we can right now. */
-                if(FD_ISSET(i->sock, &write)) {
+                if(FD_ISSET(i->sock, &writefds)) {
                     if(i->sendbuf_cur) {
                         sent = send(i->sock, i->sendbuf + i->sendbuf_start,
                                     i->sendbuf_cur - i->sendbuf_start, 0);
