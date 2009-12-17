@@ -839,7 +839,7 @@ static void handle_connections() {
             FD_SET(i->sock, &readfds);
 
             /* Only add to the write fd_set if we have something to send. */
-            if(i->sendbuf_cur) {
+            if(i->sendbuf_cur || i->sending_data) {
                 FD_SET(i->sock, &writefds);
             }
 
