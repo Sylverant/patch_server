@@ -53,8 +53,6 @@
 #include "patch_packets.h"
 #include "patch_server.h"
 
-#define VERSION "0.1.0"
-
 /* The ports to listen on. */
 #define PC_PATCH_PORT 10000
 #define PC_DATA_PORT  10001
