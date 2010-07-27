@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009 Lawrence Sebald
+    Copyright (C) 2009, 2010 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -36,6 +36,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <setjmp.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -68,6 +69,13 @@ static struct client_queue clients = TAILQ_HEAD_INITIALIZER(clients);
 static struct file_queue files = TAILQ_HEAD_INITIALIZER(files);
 static int file_count = 0;
 static int client_count = 0;
+
+static sigjmp_buf jmpbuf;
+static volatile sig_atomic_t rehash = 0;
+static volatile sig_atomic_t canjump = 0;
+
+/* Forward declaration... */
+static void rehash_files();
 
 /* Create a new connection, storing it in the list of clients. */
 static patch_client_t *create_connection(int sock, in_addr_t ip, int type) {
@@ -473,14 +481,12 @@ static void parse_command_line(int argc, char *argv[]) {
 static void load_config() {
     struct in_addr tmp;
 
-    debug(DBG_LOG, "Loading Sylverant configuration file... ");
+    debug(DBG_LOG, "Loading Sylverant configuration file...\n");
 
     if(sylverant_read_config(&cfg)) {
         debug(DBG_ERROR, "Cannot load Sylverant configuration file!\n");
         exit(1);
     }
-
-    debug(DBG_LOG, "Ok\n");
 
     debug(DBG_LOG, "Configured parameters:\n");
 
@@ -512,14 +518,19 @@ static void read_welcome_message() {
     long size, i, j, ch;
     unsigned short *buf;
 
-    debug(DBG_LOG, "Loading welcome message file... ");
+    /* Clean up the old message if we're rehashing. */
+    if(welcome_msg) {
+        free(welcome_msg);
+    }
+
+    debug(DBG_LOG, "Loading welcome message file...\n");
 
     /* Open up the file. */
     fp = fopen("config/patch_welcome", "rb");
 
     if(!fp) {
         debug(DBG_ERROR, "Cannot load the patch_welcome file.\n"
-              "Please be sure it is in the corect directory.\n");
+              "Please be sure it is in the correct directory.\n");
         exit(1);
     }
 
@@ -823,11 +834,33 @@ static void handle_connections() {
     }
     
     for(;;) {
+        /* Set this up in case a signal comes in during the time between calling
+           this and the select(). */
+        if(!sigsetjmp(jmpbuf, 1)) {
+            canjump = 1;
+        }
+
+        /* If we need to, rehash the patches and welcome message. */
+        if(rehash && client_count == 0) {
+            canjump = 0;
+            rehash_files();
+            rehash = 0;
+            canjump = 1;
+        }
+
         /* Clear out the fd_sets and set the timeout value for select. */
         FD_ZERO(&readfds);
         FD_ZERO(&writefds);
         nfds = 0;
-        timeout.tv_sec = 9001;
+
+        /* Set the timeout differently if we're waiting on a rehash. */
+        if(!rehash) {
+            timeout.tv_sec = 9001;
+        }
+        else {
+            timeout.tv_sec = 10;
+        }
+
         timeout.tv_usec = 0;
 
         /* Fill the sockets into the fd_set so we can use select below. */
@@ -842,16 +875,25 @@ static void handle_connections() {
             nfds = nfds > i->sock ? nfds : i->sock;
         }
 
-        /* Add the listening sockets to the read fd_set. */
-        FD_SET(patch_sock, &readfds);
-        nfds = nfds > patch_sock ? nfds : patch_sock;
-        FD_SET(data_sock, &readfds);
-        nfds = nfds > data_sock ? nfds : data_sock;
-        FD_SET(web_sock, &readfds);
-        nfds = nfds > web_sock ? nfds : web_sock;
+        /* Add the listening sockets to the read fd_set if we aren't waiting on
+           all clients to disconnect for a rehash operation. Since they won't be
+           in the fd_set if we are waiting, we don't have to worry about clients
+           connecting while we're trying to do a rehash operation. */
+        if(!rehash) {
+            FD_SET(patch_sock, &readfds);
+            nfds = nfds > patch_sock ? nfds : patch_sock;
+            FD_SET(data_sock, &readfds);
+            nfds = nfds > data_sock ? nfds : data_sock;
+            FD_SET(web_sock, &readfds);
+            nfds = nfds > web_sock ? nfds : web_sock;
+        }
 
         /* Wait to see if we get any incoming data. */
         if(select(nfds + 1, &readfds, &writefds, NULL, &timeout) > 0) {
+            /* Make sure a rehash event doesn't interrupt any of this stuff,
+               it will get handled the next time through the loop. */
+            canjump = 0;
+
             /* Check the listening sockets first. */
             if(FD_ISSET(patch_sock, &readfds)) {
                 alen = sizeof(struct sockaddr_in);
@@ -952,7 +994,9 @@ static void handle_connections() {
         /* Clean up any dead connections (its not safe to do a TAILQ_REMOVE in
            the middle of a TAILQ_FOREACH, and destroy_connection does indeed
            use TAILQ_REMOVE). */
+        canjump = 0;
         i = TAILQ_FIRST(&clients);
+
         while(i) {
             tmp = TAILQ_NEXT(i, qentry);
 
@@ -1064,16 +1108,27 @@ static void build_patch_list(const char *path) {
     closedir(d);
 }
 
-/* Signal handler registered to SIGUSR1. Used to rescan the directory for newly
-   updated files without restarting the server completely. */
-static void sig_handler(int signum) {
+static void rehash_files() {
     clear_patch_list();
+    read_welcome_message();
+
     debug(DBG_LOG, "Rescanning patches directory...\n");
     build_patch_list("patches");
-    debug(DBG_LOG, "Ok\n");
 }
 
-/* Install the signal handler for SIGUSR1. Calls the above function. */
+/* Signal handler registered to SIGHUP. Sending SIGHUP to the program will cause
+   it to rehash its configuration and rescan the patches directory at its next
+   earliest convenience. */
+static void sig_handler(int signum) {
+    rehash = 1;
+
+    if(canjump) {
+        canjump = 0;
+        siglongjmp(jmpbuf, 1);
+    }
+}
+
+/* Install the signal handler for SIGHUP. Calls the above function. */
 static void install_signal_handler() {
     struct sigaction sa;
 
@@ -1081,14 +1136,12 @@ static void install_signal_handler() {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
 
-    debug(DBG_LOG, "Installing SIGUSR1 handler... ");
+    debug(DBG_LOG, "Installing SIGHUP handler...\n ");
 
-    if(sigaction(SIGUSR1, &sa, NULL) == -1) {
+    if(sigaction(SIGHUP, &sa, NULL) == -1) {
         perror("sigaction");
         exit(1);
     }
-
-    debug(DBG_LOG, "Ok\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -1105,7 +1158,6 @@ int main(int argc, char *argv[]) {
     /* Build the list of patched files. */
     debug(DBG_LOG, "Building patch list...\n");
     build_patch_list("patches");
-    debug(DBG_LOG, "Ok\n");
 
     /* Initialize the random-number generator. */
     init_genrand(time(NULL));
