@@ -79,8 +79,16 @@ static void rehash_files();
 
 /* Create a new connection, storing it in the list of clients. */
 static patch_client_t *create_connection(int sock, in_addr_t ip, int type) {
-    patch_client_t *rv = (patch_client_t *)malloc(sizeof(patch_client_t));
+    patch_client_t *rv;
     uint32_t svect, cvect;
+
+    /* Make sure we haven't hit the max number of clients connected. */
+    if(cfg.patch.maxconn && client_count >= cfg.patch.maxconn) {
+        return NULL;
+    }
+
+    /* Allocate the space for the new client. */
+    rv = (patch_client_t *)malloc(sizeof(patch_client_t));
 
     if(!rv) {
         return NULL;
