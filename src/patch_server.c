@@ -1158,7 +1158,7 @@ int main(int argc, char *argv[]) {
     load_config();
 
     /* Change to the Sylverant data directory for all future stuff. */
-    chdir(SYLVERANT_DIRECTORY);
+    chdir(sylverant_directory);
 
     /* Attempt to read the Welcome message from the text file. */
     read_welcome_message();
