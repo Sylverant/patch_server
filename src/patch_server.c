@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009, 2010 Lawrence Sebald
+    Copyright (C) 2009, 2010, 2011 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -428,7 +428,7 @@ done:
 /* Print information about this program to stdout. */
 static void print_program_info() {
     printf("Sylverant Patch Server version %s\n", VERSION);
-    printf("Copyright (C) 2009 Lawrence Sebald\n\n");
+    printf("Copyright (C) 2009, 2010, 2011 Lawrence Sebald\n\n");
     printf("This program is free software: you can redistribute it and/or\n"
            "modify it under the terms of the GNU General Public License\n"
            "version 3 as published by the Free Software Foundation.\n\n"
@@ -1147,6 +1147,14 @@ static void install_signal_handler() {
     debug(DBG_LOG, "Installing SIGHUP handler...\n ");
 
     if(sigaction(SIGHUP, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(1);
+    }
+
+    /* Ignore SIGPIPEs */
+    sa.sa_handler = SIG_IGN;
+
+    if(sigaction(SIGPIPE, &sa, NULL) == -1) {
         perror("sigaction");
         exit(1);
     }
