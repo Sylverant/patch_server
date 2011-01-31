@@ -499,17 +499,7 @@ static void load_config() {
     debug(DBG_LOG, "Configured parameters:\n");
 
     tmp.s_addr = cfg.server_ip;
-    debug(DBG_LOG, "Server (bound) IP: %s\n", inet_ntoa(tmp));
-
-    if(cfg.override_on) {
-        tmp.s_addr = cfg.override_ip;
-        debug(DBG_LOG, "Server (reported) IP: %s\n", inet_ntoa(tmp));
-        tmp.s_addr = cfg.netmask;
-        debug(DBG_LOG, "Netmask: %s\n", inet_ntoa(tmp));
-    }
-    else {
-        cfg.override_ip = cfg.server_ip;
-    }
+    debug(DBG_LOG, "Server IP: %s\n", inet_ntoa(tmp));
 
     if(cfg.patch.maxconn) {
         debug(DBG_LOG, "Max number of connections: %d\n", cfg.patch.maxconn);
@@ -598,10 +588,6 @@ static void read_welcome_message() {
 
 /* Process one patch packet. */
 static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
-    in_addr_t tmp;
-
-    debug(DBG_LOG, "Patch: Receieved type 0x%04X\n", LE16(pkt->pkt_type));
-
     switch(LE16(pkt->pkt_type)) {
         case PATCH_WELCOME_TYPE:
             if(send_simple(c, PATCH_LOGIN_TYPE)) {
@@ -615,17 +601,7 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
                 return -2;
             }
 
-            /* If the client is on the local network, send out the local IP, not
-               the override IP. */
-            if(cfg.override_on && (c->ip_addr & cfg.netmask) ==
-               (cfg.server_ip & cfg.netmask)) {
-                tmp = cfg.server_ip;
-            }
-            else {
-                tmp = cfg.override_ip;
-            }
-
-            if(send_redirect(c, tmp, htons(PC_DATA_PORT))) {
+            if(send_redirect(c, cfg.server_ip, htons(PC_DATA_PORT))) {
                 return -2;
             }
 
@@ -644,8 +620,6 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
 
 /* Process one data packet. */
 static int process_data_packet(patch_client_t *c, pkt_header_t *pkt) {
-    debug(DBG_LOG, "Data: Receieved type 0x%04X\n", LE16(pkt->pkt_type));
-
     switch(LE16(pkt->pkt_type)) {
         case PATCH_WELCOME_TYPE:
             if(send_simple(c, PATCH_LOGIN_TYPE)) {
@@ -802,7 +776,7 @@ static void handle_connections() {
 
     /* Bind the three sockets to the appropriate ports. */
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = cfg.server_ip;
+    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(PC_PATCH_PORT);
     memset(addr.sin_zero, 0, sizeof(addr.sin_zero));
 
