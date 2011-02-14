@@ -73,6 +73,7 @@ static int client_count = 0;
 static sigjmp_buf jmpbuf;
 static volatile sig_atomic_t rehash = 0;
 static volatile sig_atomic_t canjump = 0;
+static int dont_daemonize = 0;
 
 /* Forward declaration... */
 static void rehash_files();
@@ -449,6 +450,7 @@ static void print_help(const char *bin) {
            "--verbose       Log many messages that might help debug a problem\n"
            "--quiet         Only log warning and error messages\n"
            "--reallyquiet   Only log error messages\n"
+           "--nodaemon      Don't daemonize\n"
            "--help          Print this help and exit\n\n"
            "Note that if more than one verbosity level is specified, the last\n"
            "one specified will be used. The default is --verbose.\n", bin);
@@ -462,7 +464,7 @@ static void parse_command_line(int argc, char *argv[]) {
     for(i = 1; i < argc; ++i) {
         if(!strcmp(argv[i], "--version")) {
             print_program_info();
-            exit(0);
+            exit(EXIT_SUCCESS);
         }
         else if(!strcmp(argv[i], "--verbose")) {
             debug_set_threshold(DBG_LOG);
@@ -473,40 +475,26 @@ static void parse_command_line(int argc, char *argv[]) {
         else if(!strcmp(argv[i], "--reallyquiet")) {
             debug_set_threshold(DBG_ERROR);
         }
+        else if(!strcmp(argv[i], "--nodaemon")) {
+            dont_daemonize = 1;
+        }
         else if(!strcmp(argv[i], "--help")) {
             print_help(argv[0]);
-            exit(0);
+            exit(EXIT_SUCCESS);
         }
         else {
             printf("Illegal command line argument: %s\n", argv[i]);
             print_help(argv[0]);
-            exit(1);
+            exit(EXIT_FAILURE);
         }
     }
 }
 
 /* Load the configuration file and print out parameters with DBG_LOG. */
 static void load_config() {
-    struct in_addr tmp;
-
-    debug(DBG_LOG, "Loading Sylverant configuration file...\n");
-
     if(sylverant_read_config(&cfg)) {
         debug(DBG_ERROR, "Cannot load Sylverant configuration file!\n");
-        exit(1);
-    }
-
-    debug(DBG_LOG, "Configured parameters:\n");
-
-    tmp.s_addr = cfg.server_ip;
-    debug(DBG_LOG, "Server IP: %s\n", inet_ntoa(tmp));
-
-    if(cfg.patch.maxconn) {
-        debug(DBG_LOG, "Max number of connections: %d\n", cfg.patch.maxconn);
-    }
-
-    if(cfg.patch.throttle) {
-        debug(DBG_LOG, "Upload throttle: %d KB/s\n", cfg.patch.throttle);
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -529,7 +517,7 @@ static void read_welcome_message() {
     if(!fp) {
         debug(DBG_ERROR, "Cannot load the patch_welcome file.\n"
               "Please be sure it is in the correct directory.\n");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     /* Determine its length. */
@@ -543,7 +531,7 @@ static void read_welcome_message() {
 
     if(!buf) {
         perror("malloc");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     fread(buf, 1, size, fp);
@@ -568,7 +556,7 @@ static void read_welcome_message() {
 
     if(!welcome_msg) {
         perror("malloc");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     /* Copy the final message. */
@@ -755,7 +743,7 @@ static int read_from_client(patch_client_t *c) {
 
 /* Connection handling loop... */
 static void handle_connections() {
-    int patch_sock, data_sock, web_sock, sock;
+    int patch_sock, data_sock, web_sock, sock, val;
     struct sockaddr_in addr;
     socklen_t alen = sizeof(struct sockaddr_in);
     fd_set readfds, writefds;
@@ -771,7 +759,26 @@ static void handle_connections() {
 
     if(patch_sock < 0 || data_sock < 0 || web_sock < 0) {
         perror("socket");
-        exit(1);
+        exit(EXIT_FAILURE);
+    }
+
+    /* Set SO_REUSEADDR so we don't run into issues when we kill the patch
+       server bring it back up quickly... */
+    val = 1;
+    if(setsockopt(patch_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
+        perror("setsockopt");
+        /* We can ignore this error, pretty much... its just a convenience thing
+           anyway... */
+    }
+
+    val = 1;
+    if(setsockopt(data_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
+        perror("setsockopt");
+    }
+
+    val = 1;
+    if(setsockopt(web_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
+        perror("setsockopt");
     }
 
     /* Bind the three sockets to the appropriate ports. */
@@ -782,37 +789,37 @@ static void handle_connections() {
 
     if(bind(patch_sock, (struct sockaddr *)&addr, alen)) {
         perror("bind");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     addr.sin_port = htons(PC_DATA_PORT);
 
     if(bind(data_sock, (struct sockaddr *)&addr, alen)) {
         perror("bind");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     addr.sin_port = htons(WEB_PORT);
 
     if(bind(web_sock, (struct sockaddr *)&addr, alen)) {
         perror("bind");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     /* Set them all up to listen for connections. */
     if(listen(patch_sock, 10)) {
         perror("listen");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     if(listen(data_sock, 10)) {
         perror("listen");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     if(listen(web_sock, 10)) {
         perror("listen");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
     
     for(;;) {
@@ -1025,7 +1032,7 @@ static void build_patch_list(const char *path) {
 
     if(!d) {
         perror("opendir");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     /* Loop through each item in the directory we have open. */
@@ -1046,26 +1053,26 @@ static void build_patch_list(const char *path) {
             f = (patch_file_t *)malloc(sizeof(patch_file_t));
             if(!f) {
                 perror("malloc");
-                exit(1);
+                exit(EXIT_FAILURE);
             }
 
             f->filename = strdup(tmp);
             if(!f->filename) {
                 perror("strdup");
-                exit(1);
+                exit(EXIT_FAILURE);
             }
 
             /* Read the whole file in to evaluate the checksum. */
             data = malloc(st.st_size);
             if(!data) {
                 perror("malloc");
-                exit(1);
+                exit(EXIT_FAILURE);
             }
 
             fd = fopen(tmp, "rb");
             if(!fd) {
                 perror("fopen");
-                exit(1);
+                exit(EXIT_FAILURE);
             }
 
             fread(data, 1, st.st_size, fd);
@@ -1122,7 +1129,7 @@ static void install_signal_handler() {
 
     if(sigaction(SIGHUP, &sa, NULL) == -1) {
         perror("sigaction");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     /* Ignore SIGPIPEs */
@@ -1130,8 +1137,22 @@ static void install_signal_handler() {
 
     if(sigaction(SIGPIPE, &sa, NULL) == -1) {
         perror("sigaction");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
+}
+
+static void open_log() {
+    FILE *dbgfp;
+
+    dbgfp = fopen("logs/patch_debug.log", "a");
+
+    if(!dbgfp) {
+        debug(DBG_ERROR, "Cannot open log file\n");
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+
+    debug_set_file(dbgfp);
 }
 
 int main(int argc, char *argv[]) {
@@ -1141,6 +1162,17 @@ int main(int argc, char *argv[]) {
 
     /* Change to the Sylverant data directory for all future stuff. */
     chdir(sylverant_directory);
+
+    /* If we're still alive and we're supposed to daemonize, do it now. */
+    if(!dont_daemonize) {
+        open_log();
+
+        if(daemon(1, 0)) {
+            debug(DBG_ERROR, "Cannot daemonize\n");
+            perror("daemon");
+            exit(EXIT_FAILURE);
+        }
+    }
 
     /* Attempt to read the Welcome message from the text file. */
     read_welcome_message();
