@@ -1184,7 +1184,7 @@ int main(int argc, char *argv[]) {
     /* Initialize the random-number generator. */
     init_genrand(time(NULL));
 
-    /* Install the USR1 signal handler. */
+    /* Install the SIGHUP signal handler. */
     install_signal_handler();
 
     /* Enter the main connection handling loop. */
