@@ -59,7 +59,7 @@
 #define PC_DATA_PORT  10001
 #define WEB_PORT      10002
 
-static sylverant_config_t cfg;
+static sylverant_config_t *cfg;
 
 static long welcome_msg_size = 0;
 static unsigned short *welcome_msg = NULL;
@@ -82,11 +82,6 @@ static void rehash_files();
 static patch_client_t *create_connection(int sock, in_addr_t ip, int type) {
     patch_client_t *rv;
     uint32_t svect, cvect;
-
-    /* Make sure we haven't hit the max number of clients connected. */
-    if(cfg.patch.maxconn && client_count >= cfg.patch.maxconn) {
-        return NULL;
-    }
 
     /* Allocate the space for the new client. */
     rv = (patch_client_t *)malloc(sizeof(patch_client_t));
@@ -589,7 +584,7 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
                 return -2;
             }
 
-            if(send_redirect(c, cfg.server_ip, htons(PC_DATA_PORT))) {
+            if(send_redirect(c, cfg->server_ip, htons(PC_DATA_PORT))) {
                 return -2;
             }
 
