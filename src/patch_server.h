@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009 Lawrence Sebald
+    Copyright (C) 2009, 2011 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -62,9 +62,11 @@ typedef struct patch_client {
     TAILQ_ENTRY(patch_client) qentry;
 
     int type;
-    in_addr_t ip_addr;
     int sock;
     int disconnected;
+    int is_ipv6;
+
+    struct sockaddr_storage ip_addr;
     CRYPT_SETUP client_cipher;
     CRYPT_SETUP server_cipher;
 

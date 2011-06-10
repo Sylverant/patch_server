@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009 Lawrence Sebald
+    Copyright (C) 2009, 2011 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -68,6 +68,18 @@ typedef struct patch_redirect {
     uint16_t data_port;      /* Port of the DATA portion (big-endian) */
     uint16_t padding;        /* Zero */
 } PACKED patch_redirect_pkt;
+
+#ifdef ENABLE_IPV6
+
+/* IPv6 version of the above */
+typedef struct patch_redirect6 {
+    pkt_header_t hdr;
+    uint8_t data_ip[16];
+    uint16_t data_port;
+    uint16_t padding;
+} PACKED patch_redirect6_pkt;
+
+#endif
 
 /* The Change Directory packet, which tells the client to switch directories. */
 typedef struct patch_chdir {
@@ -138,10 +150,12 @@ typedef struct patch_file_done {
 #define PATCH_SEND_DONE                 0x0012
 #define PATCH_MESSAGE_TYPE              0x0013
 #define PATCH_REDIRECT_TYPE             0x0014
+#define PATCH_REDIRECT6_TYPE            0x0614
 
 #define PACKET_HEADER_LENGTH            0x0004
 #define PATCH_WELCOME_LENGTH            0x004C
 #define PATCH_REDIRECT_LENGTH           0x000C
+#define PATCH_REDIRECT6_LENGTH          0x0018
 
 #define PATCH_FILE_SEND_LENGTH          0x003C
 #define PATCH_DATA_SEND_LENGTH          0x0010
@@ -168,6 +182,14 @@ int send_message(patch_client_t *c, uint16_t *msg, long size);
 /* Send the data server redirect packet to the given client.
    IP and port MUST both be in network byte-order. */
 int send_redirect(patch_client_t *c, in_addr_t ip, uint16_t port);
+
+#ifdef ENABLE_IPV6
+
+/* Send a IPv6 redirect packet to the given client.
+   The port must be in network byte order. */
+int send_redirect6(patch_client_t *c, const uint8_t ip[16], uint16_t port);
+
+#endif
 
 /* Send a change directory packet to the given client. */
 int send_chdir(patch_client_t *c, const char dir[]);

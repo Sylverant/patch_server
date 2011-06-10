@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009 Lawrence Sebald
+    Copyright (C) 2009, 2011 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -164,6 +164,29 @@ int send_redirect(patch_client_t *c, in_addr_t ip, uint16_t port) {
     /* Send the packet away */
     return send_raw(c, PATCH_REDIRECT_LENGTH);
 }
+
+#ifdef ENABLE_IPV6
+
+/* Send a IPv6 redirect packet to the given client.
+   The port must be in network byte order. */
+int send_redirect6(patch_client_t *c, const uint8_t ip[16], uint16_t port) {
+    patch_redirect6_pkt *pkt = (patch_redirect6_pkt *)sendbuf;
+
+    /* Fill in the header, and copy the IP/Port. */
+    pkt->hdr.pkt_len = LE16(PATCH_REDIRECT6_LENGTH);
+    pkt->hdr.pkt_type = LE16(PATCH_REDIRECT6_TYPE);
+    memcpy(pkt->data_ip, ip, 16);
+    pkt->data_port = port;
+    pkt->padding = 0;
+
+    /* Encrypt the packet */
+    CRYPT_CryptData(&c->server_cipher, pkt, PATCH_REDIRECT6_LENGTH, 1);
+
+    /* Send the packet away */
+    return send_raw(c, PATCH_REDIRECT6_LENGTH);
+}
+
+#endif
 
 /* Send a change directory packet ot the given client. */
 int send_chdir(patch_client_t *c, const char dir[]) {

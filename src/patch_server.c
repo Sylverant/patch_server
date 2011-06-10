@@ -54,10 +54,27 @@
 #include "patch_packets.h"
 #include "patch_server.h"
 
+#ifdef ENABLE_IPV6
+#define NUM_PORTS 6
+#else
+#define NUM_PORTS 3
+#endif
+
 /* The ports to listen on. */
-#define PC_PATCH_PORT 10000
-#define PC_DATA_PORT  10001
-#define WEB_PORT      10002
+#define PC_PATCH_PORT   10000
+#define PC_DATA_PORT    10001
+#define WEB_PORT        10002
+
+static const int ports[NUM_PORTS][3] = {
+    { AF_INET , PC_PATCH_PORT, 0 },
+    { AF_INET , PC_DATA_PORT , 1 },
+    { AF_INET , WEB_PORT     , 2 },
+#ifdef ENABLE_IPV6
+    { AF_INET6, PC_PATCH_PORT, 0 },
+    { AF_INET6, PC_DATA_PORT , 1 },
+    { AF_INET6, WEB_PORT     , 2 }
+#endif
+};
 
 static sylverant_config_t *cfg;
 
@@ -79,7 +96,8 @@ static int dont_daemonize = 0;
 static void rehash_files();
 
 /* Create a new connection, storing it in the list of clients. */
-static patch_client_t *create_connection(int sock, in_addr_t ip, int type) {
+static patch_client_t *create_connection(int sock, int type,
+                                         struct sockaddr *ip, socklen_t size) {
     patch_client_t *rv;
     uint32_t svect, cvect;
 
@@ -94,8 +112,13 @@ static patch_client_t *create_connection(int sock, in_addr_t ip, int type) {
 
     /* Store basic parameters in the client structure. */
     rv->sock = sock;
-    rv->ip_addr = ip;
     rv->type = type;
+    memcpy(&rv->ip_addr, ip, size);
+
+    /* Is the user on IPv6? */
+    if(ip->sa_family == AF_INET6) {
+        rv->is_ipv6 = 1;
+    }
 
     /* Generate the encryption keys for the client and server. */
     cvect = (uint32_t)genrand_int32();
@@ -584,6 +607,17 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
                 return -2;
             }
 
+#ifdef ENABLE_IPV6
+            if(c->is_ipv6) {
+                if(send_redirect6(c, cfg->server_ip6, htons(PC_DATA_PORT))) {
+                    return -2;
+                }
+
+                c->disconnected = 1;
+                break;
+            }
+#endif
+
             if(send_redirect(c, cfg->server_ip, htons(PC_DATA_PORT))) {
                 return -2;
             }
@@ -736,86 +770,38 @@ static int read_from_client(patch_client_t *c) {
     return rv;
 }
 
+static const void *my_ntop(struct sockaddr_storage *addr,
+                           char str[INET6_ADDRSTRLEN]) {
+    int family = addr->ss_family;
+
+    switch(family) {
+        case AF_INET:
+        {
+            struct sockaddr_in *a = (struct sockaddr_in *)addr;
+            return inet_ntop(family, &a->sin_addr, str, INET6_ADDRSTRLEN);
+        }
+
+        case AF_INET6:
+        {
+            struct sockaddr_in6 *a = (struct sockaddr_in6 *)addr;
+            return inet_ntop(family, &a->sin6_addr, str, INET6_ADDRSTRLEN);
+        }
+    }
+
+    return NULL;
+}
+
 /* Connection handling loop... */
-static void handle_connections() {
-    int patch_sock, data_sock, web_sock, sock, val;
-    struct sockaddr_in addr;
-    socklen_t alen = sizeof(struct sockaddr_in);
+static void handle_connections(int sockets[NUM_PORTS]) {
+    int sock, nfds, j;
+    socklen_t len;
+    struct sockaddr_storage addr;
+    struct sockaddr *addr_p = (struct sockaddr *)&addr;
+    char ipstr[INET6_ADDRSTRLEN];
     fd_set readfds, writefds;
-    int nfds = 0;
     struct timeval timeout;
     patch_client_t *i, *tmp;
     ssize_t sent;
-
-    /* Create the 3 sockets that we'll listen on. */
-    patch_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    data_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-    web_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-
-    if(patch_sock < 0 || data_sock < 0 || web_sock < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Set SO_REUSEADDR so we don't run into issues when we kill the patch
-       server bring it back up quickly... */
-    val = 1;
-    if(setsockopt(patch_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
-        perror("setsockopt");
-        /* We can ignore this error, pretty much... its just a convenience thing
-           anyway... */
-    }
-
-    val = 1;
-    if(setsockopt(data_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
-        perror("setsockopt");
-    }
-
-    val = 1;
-    if(setsockopt(web_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
-        perror("setsockopt");
-    }
-
-    /* Bind the three sockets to the appropriate ports. */
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(PC_PATCH_PORT);
-    memset(addr.sin_zero, 0, sizeof(addr.sin_zero));
-
-    if(bind(patch_sock, (struct sockaddr *)&addr, alen)) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-
-    addr.sin_port = htons(PC_DATA_PORT);
-
-    if(bind(data_sock, (struct sockaddr *)&addr, alen)) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-
-    addr.sin_port = htons(WEB_PORT);
-
-    if(bind(web_sock, (struct sockaddr *)&addr, alen)) {
-        perror("bind");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Set them all up to listen for connections. */
-    if(listen(patch_sock, 10)) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-
-    if(listen(data_sock, 10)) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
-
-    if(listen(web_sock, 10)) {
-        perror("listen");
-        exit(EXIT_FAILURE);
-    }
     
     for(;;) {
         /* Set this up in case a signal comes in during the time between calling
@@ -864,12 +850,10 @@ static void handle_connections() {
            in the fd_set if we are waiting, we don't have to worry about clients
            connecting while we're trying to do a rehash operation. */
         if(!rehash) {
-            FD_SET(patch_sock, &readfds);
-            nfds = nfds > patch_sock ? nfds : patch_sock;
-            FD_SET(data_sock, &readfds);
-            nfds = nfds > data_sock ? nfds : data_sock;
-            FD_SET(web_sock, &readfds);
-            nfds = nfds > web_sock ? nfds : web_sock;
+            for(j = 0; j < NUM_PORTS; ++j) {
+                FD_SET(sockets[j], &readfds);
+                nfds = nfds > sockets[j] ? nfds : sockets[j];
+            }
         }
 
         /* Wait to see if we get any incoming data. */
@@ -879,56 +863,32 @@ static void handle_connections() {
             canjump = 0;
 
             /* Check the listening sockets first. */
-            if(FD_ISSET(patch_sock, &readfds)) {
-                alen = sizeof(struct sockaddr_in);
+            for(j = 0; j < NUM_PORTS; ++j) {
+                if(FD_ISSET(sockets[j], &readfds)) {
+                    len = sizeof(struct sockaddr_storage);
 
-                if((sock = accept(patch_sock, (struct sockaddr *)&addr,
-                                  &alen)) < 0) {
-                    perror("accept");
-                }
-                else {
-                    if(!create_connection(sock, addr.sin_addr.s_addr, 0)) {
-                        close(sock);
+                    if((sock = accept(sockets[j], addr_p, &len)) < 0) {
+                        perror("accept");
                     }
+                    else {
+                        if(ports[j][2] > 1) {
+                            /* Send the number of connected clients, and close
+                               the socket. */
+                            nfds = LE32(client_count);
+                            send(sock, &nfds, 4, 0);
+                            close(sock);
+                            continue;
+                        }
 
-                    debug(DBG_LOG, "Accepted patch connection from %s\n",
-                          inet_ntoa(addr.sin_addr));
-                }
-            }
-
-            if(FD_ISSET(data_sock, &readfds)) {
-                alen = sizeof(struct sockaddr_in);
-
-                if((sock = accept(data_sock, (struct sockaddr *)&addr,
-                                  &alen)) < 0) {
-                    perror("accept");
-                }
-                else {
-                    if(!create_connection(sock, addr.sin_addr.s_addr,1)) {
-                        close(sock);
+                        if(!create_connection(sock, ports[j][2], addr_p, len)) {
+                            close(sock);
+                        }
+                        else {
+                            my_ntop(&addr, ipstr);
+                            debug(DBG_LOG, "Accepted %s connection from %s\n",
+                                  ports[j][2] ? "DATA" : "PATCH", ipstr);
+                        }
                     }
-
-                    debug(DBG_LOG, "Accepted data connection from %s\n",
-                          inet_ntoa(addr.sin_addr));
-                }
-            }
-
-            if(FD_ISSET(web_sock, &readfds)) {
-                alen = sizeof(struct sockaddr_in);
-
-                if((sock = accept(web_sock, (struct sockaddr *)&addr,
-                                  &alen)) < 0) {
-                    perror("accept");
-                }
-                else {
-                    debug(DBG_LOG, "Accepted web connection from %s\n",
-                          inet_ntoa(addr.sin_addr));
-
-                    /* Send the number of connected clients, and close the
-                       socket. */
-                    nfds = LE32(client_count);
-                    send(sock, &nfds, 4, 0);
-                    close(sock);
                 }
             }
 
@@ -1120,7 +1080,7 @@ static void install_signal_handler() {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
 
-    debug(DBG_LOG, "Installing SIGHUP handler...\n ");
+    debug(DBG_LOG, "Installing SIGHUP handler...\n");
 
     if(sigaction(SIGHUP, &sa, NULL) == -1) {
         perror("sigaction");
@@ -1134,6 +1094,83 @@ static void install_signal_handler() {
         perror("sigaction");
         exit(EXIT_FAILURE);
     }
+}
+
+static int open_sock(int family, uint16_t port) {
+    int sock = -1, val;
+    struct sockaddr_in addr;
+    struct sockaddr_in6 addr6;
+
+    /* Create the socket and listen for connections. */
+    sock = socket(family, SOCK_STREAM, IPPROTO_TCP);
+
+    if(sock < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    /* Set SO_REUSEADDR so we don't run into issues when we kill the login
+       server bring it back up quickly... */
+    val = 1;
+    if(setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(int))) {
+        perror("setsockopt");
+        /* We can ignore this error, pretty much... its just a convenience thing
+           anyway... */
+    }
+
+    if(family == PF_INET) {
+        addr.sin_family = family;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(port);
+        memset(addr.sin_zero, 0, 8);
+
+        if(bind(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr_in))) {
+            perror("bind");
+            close(sock);
+            return -1;
+        }
+
+        if(listen(sock, 10)) {
+            perror("listen");
+            close(sock);
+            return -1;
+        }
+    }
+    else if(family == PF_INET6) {
+        /* Since we create separate sockets for IPv4 and IPv6, make this one
+           support ONLY IPv6. */
+        val = 1;
+        if(setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &val, sizeof(int))) {
+            perror("setsockopt IPV6_V6ONLY");
+            close(sock);
+            return -1;
+        }
+
+        memset(&addr6, 0, sizeof(struct sockaddr_in6));
+
+        addr6.sin6_family = family;
+        addr6.sin6_addr = in6addr_any;
+        addr6.sin6_port = htons(port);
+
+        if(bind(sock, (struct sockaddr *)&addr6, sizeof(struct sockaddr_in6))) {
+            perror("bind");
+            close(sock);
+            return -1;
+        }
+
+        if(listen(sock, 10)) {
+            perror("listen");
+            close(sock);
+            return -1;
+        }
+    }
+    else {
+        debug(DBG_ERROR, "Unknown socket family\n");
+        close(sock);
+        return -1;
+    }
+
+    return sock;
 }
 
 static void open_log() {
@@ -1151,6 +1188,9 @@ static void open_log() {
 }
 
 int main(int argc, char *argv[]) {
+    int sockets[NUM_PORTS];
+    int i;
+
     /* Parse the command line and read our configuration. */
     parse_command_line(argc, argv);
     load_config();
@@ -1182,8 +1222,19 @@ int main(int argc, char *argv[]) {
     /* Install the SIGHUP signal handler. */
     install_signal_handler();
 
+    /* Open up all the ports */
+    for(i = 0; i < NUM_PORTS; ++i) {
+        sockets[i] = open_sock(ports[i][0], ports[i][1]);
+
+        if(!sockets[i]) {
+            debug(DBG_ERROR, "Error opening port %d (%s), exiting\n",
+                  ports[i][1], ports[i][0] == AF_INET ? "IPv4" : "IPv6");
+            exit(EXIT_FAILURE);
+        }
+    }
+
     /* Enter the main connection handling loop. */
-    handle_connections();
+    handle_connections(sockets);
 
     return 0;
 }
