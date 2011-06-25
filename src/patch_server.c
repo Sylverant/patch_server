@@ -860,7 +860,7 @@ static void handle_connections(int sockets[NUM_PORTS]) {
                         perror("accept");
                     }
                     else {
-                        if(ports[j][2] > 1) {
+                        if(ports[j][2] == CLIENT_TYPE_WEB) {
                             /* Send the number of connected clients, and close
                                the socket. */
                             nfds = LE32(client_count);
@@ -874,8 +874,15 @@ static void handle_connections(int sockets[NUM_PORTS]) {
                         }
                         else {
                             my_ntop(&addr, ipstr);
-                            debug(DBG_LOG, "Accepted %s connection from %s\n",
-                                  ports[j][2] ? "DATA" : "PATCH", ipstr);
+                            if(ports[j][2] == CLIENT_TYPE_PC_PATCH ||
+                               ports[j][2] == CLIENT_TYPE_BB_PATCH) {
+                                debug(DBG_LOG, "Accepted PATCH connection "
+                                      "from %s\n", ipstr);
+                            }
+                            else {
+                                debug(DBG_LOG, "Accepted DATA connection "
+                                      "from %s\n", ipstr);
+                            }
                         }
                     }
                 }
