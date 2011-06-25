@@ -43,9 +43,10 @@ typedef struct pkt_header {
 typedef struct patch_file {
     TAILQ_ENTRY(patch_file) qentry;
 
-    off_t size;
+    uint32_t size;
     uint32_t checksum;
     char *filename;
+    char *server_filename;
 } patch_file_t;
 
 /* Client-side file structure. */
@@ -86,7 +87,37 @@ typedef struct patch_client {
     int cur_pos;
 } patch_client_t;
 
+#define CLIENT_TYPE_PC_PATCH 0
+#define CLIENT_TYPE_PC_DATA  1
+#define CLIENT_TYPE_WEB      2
+#define CLIENT_TYPE_BB_PATCH 3
+#define CLIENT_TYPE_BB_DATA  4
+
 TAILQ_HEAD(client_queue, patch_client);
 TAILQ_HEAD(file_queue, patch_file);
+
+/* Patch server configuration structure. */
+typedef struct patch_config {
+    uint8_t server_ip6[16];
+    uint32_t server_ip;
+
+    int disallow_pc;
+    int disallow_bb;
+
+    uint16_t *pc_welcome;
+    uint16_t *bb_welcome;
+    uint16_t pc_welcome_size;
+    uint16_t bb_welcome_size;
+
+    char *pc_dir;
+    char *bb_dir;
+
+    struct file_queue pc_files;
+    struct file_queue bb_files;
+} patch_config_t;
+
+/* In patch_config.c */
+int patch_read_config(const char *fn, patch_config_t **cfg);
+void patch_free_config(patch_config_t *cfg);
 
 #endif /* !PATCH_SERVER_H */

@@ -177,7 +177,7 @@ int send_simple(patch_client_t *c, uint16_t type);
 int send_welcome(patch_client_t *c, uint32_t svect, uint32_t cvect);
 
 /* Send the packet containing the textual welcome message to the client. */
-int send_message(patch_client_t *c, uint16_t *msg, long size);
+int send_message(patch_client_t *c, uint16_t *msg, uint16_t size);
 
 /* Send the data server redirect packet to the given client.
    IP and port MUST both be in network byte-order. */
@@ -204,7 +204,7 @@ int send_send_info(patch_client_t *c, uint32_t size, uint32_t files);
 int send_file_send(patch_client_t *c, uint32_t size, const char fn[]);
 
 /* Send a part of a file to the given client (dividing it into chunks). */
-int send_file_chunk(patch_client_t *c, const char fn[]);
+int send_file_chunk(patch_client_t *c, const char fn[], const char dir[]);
 
 /* Send a file done packet to the given client. */
 int send_file_done(patch_client_t *c);

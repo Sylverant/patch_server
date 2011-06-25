@@ -40,6 +40,10 @@ LIBS="$LIBS $libxml2_LIBS"
 
 AC_CHECK_LIB([sylverant], [sylverant_read_config], , AC_MSG_ERROR([libsylverant is required!]))
 
+# Figure out iconv-related stuff
+AM_ICONV
+AM_ICONV_LINK
+
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h])
 

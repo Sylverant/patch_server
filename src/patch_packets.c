@@ -121,7 +121,7 @@ int send_welcome(patch_client_t *c, uint32_t svect, uint32_t cvect) {
 }
 
 /* Send the packet containing the textual welcome message to the client. */
-int send_message(patch_client_t *c, uint16_t *msg, long size) {
+int send_message(patch_client_t *c, uint16_t *msg, uint16_t size) {
     pkt_header_t *pkt = (pkt_header_t *)sendbuf;
     uint16_t s = size + PACKET_HEADER_LENGTH;
 
@@ -275,13 +275,18 @@ int send_file_send(patch_client_t *c, uint32_t size, const char fn[]) {
 }
 
 /* Send a part of a file to the given client (dividing it into chunks). */
-int send_file_chunk(patch_client_t *c, const char fn[]) {
-    FILE *fp = fopen(fn, "rb");
+int send_file_chunk(patch_client_t *c, const char fn[], const char dir[]) {
+    char realfn[strlen(fn) + strlen(dir) + 2];
+    FILE *fp;
     uint32_t sz;
     patch_data_send_pkt *pkt = (patch_data_send_pkt *)sendbuf;
     uint32_t cks;
     uint16_t len;
     int rv = 0;
+
+    /* Open up the file */
+    sprintf(realfn, "%s/%s", dir, fn);
+    fp = fopen(realfn, "rb");
 
     if(!fp) {
         return -1;

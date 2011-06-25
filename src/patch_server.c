@@ -55,36 +55,38 @@
 #include "patch_server.h"
 
 #ifdef ENABLE_IPV6
-#define NUM_PORTS 6
+#define NUM_PORTS 10
 #else
-#define NUM_PORTS 3
+#define NUM_PORTS 5
 #endif
 
 /* The ports to listen on. */
 #define PC_PATCH_PORT   10000
 #define PC_DATA_PORT    10001
 #define WEB_PORT        10002
+#define BB_PATCH_PORT   11000
+#define BB_DATA_PORT    11001
 
 static const int ports[NUM_PORTS][3] = {
-    { AF_INET , PC_PATCH_PORT, 0 },
-    { AF_INET , PC_DATA_PORT , 1 },
-    { AF_INET , WEB_PORT     , 2 },
+    { AF_INET , PC_PATCH_PORT, CLIENT_TYPE_PC_PATCH },
+    { AF_INET , PC_DATA_PORT , CLIENT_TYPE_PC_DATA  },
+    { AF_INET , WEB_PORT     , CLIENT_TYPE_WEB      },
+    { AF_INET , BB_PATCH_PORT, CLIENT_TYPE_BB_PATCH },
+    { AF_INET , BB_DATA_PORT , CLIENT_TYPE_BB_DATA  },
 #ifdef ENABLE_IPV6
-    { AF_INET6, PC_PATCH_PORT, 0 },
-    { AF_INET6, PC_DATA_PORT , 1 },
-    { AF_INET6, WEB_PORT     , 2 }
+    { AF_INET6, PC_PATCH_PORT, CLIENT_TYPE_PC_PATCH },
+    { AF_INET6, PC_DATA_PORT , CLIENT_TYPE_PC_DATA  },
+    { AF_INET6, WEB_PORT     , CLIENT_TYPE_WEB      },
+    { AF_INET6, BB_PATCH_PORT, CLIENT_TYPE_BB_PATCH },
+    { AF_INET6, BB_DATA_PORT , CLIENT_TYPE_BB_DATA  }
 #endif
 };
 
-static sylverant_config_t *cfg;
+static patch_config_t *cfg;
 
-static long welcome_msg_size = 0;
-static unsigned short *welcome_msg = NULL;
 static unsigned char recvbuf[65536];
 
 static struct client_queue clients = TAILQ_HEAD_INITIALIZER(clients);
-static struct file_queue files = TAILQ_HEAD_INITIALIZER(files);
-static int file_count = 0;
 static int client_count = 0;
 
 static sigjmp_buf jmpbuf;
@@ -232,7 +234,7 @@ out:
 }
 
 /* Send the list of files to check for patching to the client. */
-static int send_file_list(patch_client_t *c) {
+static int send_file_list(patch_client_t *c, struct file_queue *q) {
     uint32_t filenum = 0;
     patch_file_t *i;
     char dir[PATH_MAX], dir2[PATH_MAX];
@@ -244,10 +246,10 @@ static int send_file_list(patch_client_t *c) {
         return -1;
     }
 
-    strcpy(dir, "patches");
+    strcpy(dir, "");
 
     /* Loop through each patch file, sending the appropriate packets for it. */
-    TAILQ_FOREACH(i, &files, qentry) {
+    TAILQ_FOREACH(i, q, qentry) {
         bn = strrchr(i->filename, '/') + 1;
         dlen = strlen(i->filename) - strlen(bn) - 1;
 
@@ -271,7 +273,7 @@ static int send_file_list(patch_client_t *c) {
     }
 
     /* Change back to the base directory. */
-    if(change_directory(c, dir, "patches")) {
+    if(change_directory(c, dir, "")) {
         return -3;
     }
 
@@ -290,8 +292,8 @@ static int send_file_list(patch_client_t *c) {
 }
 
 /* Fetch the given patch index. */
-static patch_file_t *fetch_patch(uint32_t idx) {
-    patch_file_t *i = TAILQ_FIRST(&files);
+static patch_file_t *fetch_patch(uint32_t idx, struct file_queue *q) {
+    patch_file_t *i = TAILQ_FIRST(q);
 
     while(i && idx) {
         i = TAILQ_NEXT(i, qentry);
@@ -304,7 +306,14 @@ static patch_file_t *fetch_patch(uint32_t idx) {
 /* Save the file info sent by the client in their list. */
 static int store_file(patch_client_t *c, patch_file_info_reply *pkt) {
     patch_cfile_t *n;
-    patch_file_t *f = fetch_patch(LE32(pkt->patch_id));
+    patch_file_t *f;
+
+    if(c->type == CLIENT_TYPE_PC_DATA) {
+        f = fetch_patch(LE32(pkt->patch_id), &cfg->pc_files);
+    }
+    else {
+        f = fetch_patch(LE32(pkt->patch_id), &cfg->bb_files);
+    }
 
     if(!f) {
         return -1;
@@ -371,7 +380,7 @@ static int handle_list_done(patch_client_t *c) {
     /* Figure out if this is the first file to go, and if we need to figure out
        the current directory. */
     if(c->sending_data == 1) {
-        strcpy(dir, "patches");
+        strcpy(dir, "");
     }
     else if(c->sending_data == 2) {
         bn = strrchr(i->file->filename, '/') + 1;
@@ -410,7 +419,12 @@ static int handle_list_done(patch_client_t *c) {
     /* If we've got this far and we have a file to send still, send the current
        chunk of the file. */
     if(i) {
-        dlen = send_file_chunk(c, i->file->filename);
+        if(c->type == CLIENT_TYPE_PC_DATA) {
+            dlen = send_file_chunk(c, i->file->server_filename, cfg->pc_dir);
+        }
+        else {
+            dlen = send_file_chunk(c, i->file->server_filename, cfg->bb_dir);
+        }
 
         if(dlen < 0) {
             /* Something went wrong, bail. */
@@ -429,7 +443,7 @@ static int handle_list_done(patch_client_t *c) {
 
     /* Change back to the base directory. dir should be set here, since
        c->sending_data has to be 2 if we're in this state. */
-    if(change_directory(c, dir, "patches")) {
+    if(change_directory(c, dir, "")) {
         return -3;
     }
 
@@ -510,86 +524,27 @@ static void parse_command_line(int argc, char *argv[]) {
 
 /* Load the configuration file and print out parameters with DBG_LOG. */
 static void load_config() {
-    if(sylverant_read_config(&cfg)) {
-        debug(DBG_ERROR, "Cannot load Sylverant configuration file!\n");
-        exit(EXIT_FAILURE);
-    }
-}
+    char filename[strlen(sylverant_directory) + 25];
+    patch_config_t *tmp;
 
-/* Read the welcome message from the appropriate file. */
-static void read_welcome_message() {
-    FILE *fp;
-    long size, i, j, ch;
-    unsigned short *buf;
+    sprintf(filename, "%s/config/patch_config.xml", sylverant_directory);
 
-    /* Clean up the old message if we're rehashing. */
-    if(welcome_msg) {
-        free(welcome_msg);
-    }
+    if(patch_read_config(filename, &tmp)) {
+        debug(DBG_ERROR, "Cannot load patch server configuration file!\n");
 
-    debug(DBG_LOG, "Loading welcome message file...\n");
-
-    /* Open up the file. */
-    fp = fopen("config/patch_welcome", "rb");
-
-    if(!fp) {
-        debug(DBG_ERROR, "Cannot load the patch_welcome file.\n"
-              "Please be sure it is in the correct directory.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Determine its length. */
-    fseek(fp, 0, SEEK_END);
-    welcome_msg_size = size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    ch = size >> 1;
-
-    /* Allocate space to store the whole file, and read it in. */
-    buf = (unsigned short *)malloc(size * sizeof(unsigned short));
-
-    if(!buf) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    fread(buf, 1, size, fp);
-    fclose(fp);
-
-    /* Figure out how much shorter it'll eventually be, from removing any
-       BOM. */
-    for(i = 0; i < ch; ++i) {
-        if(LE16(buf[i]) == 0xFEFF) {
-            welcome_msg_size -= 2;
+        if(!cfg) {
+            exit(EXIT_FAILURE);
+        }
+        else {
+            debug(DBG_ERROR, "Using old configuration\n");
         }
     }
 
-    /* Warn the user if the result is still too long. */
-    if(welcome_msg_size > 4094) {
-        debug(DBG_WARN, "Welcome message too long, truncating to 4094 bytes\n");
-        welcome_msg_size = 4094;
+    if(cfg) {
+        patch_free_config(cfg);
     }
 
-    /* Allocate space for our actual welcome message. */
-    welcome_msg = (unsigned short *)malloc(welcome_msg_size + 2);
-
-    if(!welcome_msg) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Copy the final message. */
-    for(i = 0, j = 0; i < ch && i < 2047; ++i) {
-        if(LE16(buf[i]) != 0xFEFF) {
-            welcome_msg[j] = buf[i];
-            ++j;
-        }
-    }
-
-    welcome_msg[j] = 0x0000;
-    welcome_msg_size += 2;
-
-    /* Clean up... */ 
-    free(buf);
+    cfg = tmp;
 }
 
 /* Process one patch packet. */
@@ -603,23 +558,47 @@ static int process_patch_packet(patch_client_t *c, pkt_header_t *pkt) {
 
         case PATCH_LOGIN_TYPE:
             /* TODO: Process login? */
-            if(send_message(c, welcome_msg, welcome_msg_size)) {
-                return -2;
-            }
-
-#ifdef ENABLE_IPV6
-            if(c->is_ipv6) {
-                if(send_redirect6(c, cfg->server_ip6, htons(PC_DATA_PORT))) {
+            if(c->type == CLIENT_TYPE_PC_PATCH) {
+                if(send_message(c, cfg->pc_welcome, cfg->pc_welcome_size)) {
                     return -2;
                 }
 
-                c->disconnected = 1;
-                break;
-            }
+#ifdef ENABLE_IPV6
+                if(c->is_ipv6) {
+                    if(send_redirect6(c, cfg->server_ip6,
+                                      htons(PC_DATA_PORT))) {
+                        return -2;
+                    }
+
+                    c->disconnected = 1;
+                    break;
+                }
 #endif
 
-            if(send_redirect(c, cfg->server_ip, htons(PC_DATA_PORT))) {
-                return -2;
+                if(send_redirect(c, cfg->server_ip, htons(PC_DATA_PORT))) {
+                    return -2;
+                }
+            }
+            else {
+                if(send_message(c, cfg->bb_welcome, cfg->bb_welcome_size)) {
+                    return -2;
+                }
+
+#ifdef ENABLE_IPV6
+                if(c->is_ipv6) {
+                    if(send_redirect6(c, cfg->server_ip6,
+                                      htons(BB_DATA_PORT))) {
+                        return -2;
+                    }
+
+                    c->disconnected = 1;
+                    break;
+                }
+#endif
+
+                if(send_redirect(c, cfg->server_ip, htons(BB_DATA_PORT))) {
+                    return -2;
+                }
             }
 
             /* Force the client to disconnect at this point to prevent problems
@@ -650,9 +629,17 @@ static int process_data_packet(patch_client_t *c, pkt_header_t *pkt) {
             }
 
             /* Send the list of patches. */
-            if(send_file_list(c)) {
-                return -2;
+            if(c->type == CLIENT_TYPE_PC_DATA) {
+                if(send_file_list(c, &cfg->pc_files)) {
+                    return -2;
+                }
             }
+            else {
+                if(send_file_list(c, &cfg->bb_files)) {
+                    return -2;
+                }
+            }
+
             break;
 
         case PATCH_FILE_INFO_REPLY:
@@ -723,10 +710,12 @@ static int read_from_client(patch_client_t *c) {
                 memcpy(rbp, &c->pkt, 4);
 
                 /* Pass it onto the correct handler. */
-                if(c->type == 0) {
+                if(c->type == CLIENT_TYPE_PC_PATCH ||
+                   c->type == CLIENT_TYPE_BB_PATCH) {
                     rv = process_patch_packet(c, (pkt_header_t *)rbp);
                 }
-                else {
+                else if(c->type == CLIENT_TYPE_PC_DATA ||
+                        c->type == CLIENT_TYPE_BB_DATA) {
                     rv = process_data_packet(c, (pkt_header_t *)rbp);
                 }
 
@@ -953,111 +942,9 @@ static void handle_connections(int sockets[NUM_PORTS]) {
     }
 }
 
-/* Clear the list of files. */
-static void clear_patch_list() {
-    patch_file_t *i, *tmp;
-
-    /* Loop through all the entries in the file list, freeing all the memory. */
-    i = TAILQ_FIRST(&files);
-    while(i) {
-        tmp = TAILQ_NEXT(i, qentry);
-
-        free(i->filename);
-        TAILQ_REMOVE(&files, i, qentry);
-        free(i);
-
-        i = tmp;
-    }
-
-    file_count = 0;
-}
-
-/* Build the patched file list. */
-static void build_patch_list(const char *path) {
-    patch_file_t *f;
-    DIR *d;
-    struct dirent *de;
-    struct stat st;
-    char tmp[PATH_MAX];
-    void *data;
-    FILE *fd;
-
-    /* Open up the directory to read the list of files. */
-    d = opendir(path);
-
-    if(!d) {
-        perror("opendir");
-        exit(EXIT_FAILURE);
-    }
-
-    /* Loop through each item in the directory we have open. */
-    while((de = readdir(d))) {
-        /* Grab the directory information about this file. */
-        sprintf(tmp, "%s/%s", path, de->d_name);
-        stat(tmp, &st);
-
-        /* If we've found a directory that we should recursively scan, go ahead
-           and do that. */
-        if(st.st_mode & S_IFDIR) {
-            if(strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
-                build_patch_list(tmp);
-            }
-        }
-        /* Otherwise, if we have a regular file, process it. */
-        else if(st.st_mode & S_IFREG) {
-            f = (patch_file_t *)malloc(sizeof(patch_file_t));
-            if(!f) {
-                perror("malloc");
-                exit(EXIT_FAILURE);
-            }
-
-            f->filename = strdup(tmp);
-            if(!f->filename) {
-                perror("strdup");
-                exit(EXIT_FAILURE);
-            }
-
-            /* Read the whole file in to evaluate the checksum. */
-            data = malloc(st.st_size);
-            if(!data) {
-                perror("malloc");
-                exit(EXIT_FAILURE);
-            }
-
-            fd = fopen(tmp, "rb");
-            if(!fd) {
-                perror("fopen");
-                exit(EXIT_FAILURE);
-            }
-
-            fread(data, 1, st.st_size, fd);
-            fclose(fd);
-            f->checksum = crc32(data, st.st_size);
-            free(data);
-
-            /* Fill in the information that we require. */
-            f->size = st.st_size;
-
-            /* Add this patch onto the end of the list. */
-            TAILQ_INSERT_TAIL(&files, f, qentry);
-            ++file_count;
-
-            debug(DBG_LOG, "Patched file: %s\n", f->filename);
-            debug(DBG_LOG, "Checksum: 0x%08X\n", f->checksum);
-            debug(DBG_LOG, "Size: %lld bytes\n", (long long)f->size);
-        }
-    }
-
-    /* Close the directory, we're done. */
-    closedir(d);
-}
-
 static void rehash_files() {
-    clear_patch_list();
-    read_welcome_message();
-
-    debug(DBG_LOG, "Rescanning patches directory...\n");
-    build_patch_list("patches");
+    debug(DBG_LOG, "Reloading configuration...\n");
+    load_config();
 }
 
 /* Signal handler registered to SIGHUP. Sending SIGHUP to the program will cause
@@ -1209,13 +1096,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Attempt to read the Welcome message from the text file. */
-    read_welcome_message();
-
-    /* Build the list of patched files. */
-    debug(DBG_LOG, "Building patch list...\n");
-    build_patch_list("patches");
-
     /* Initialize the random-number generator. */
     init_genrand(time(NULL));
 
@@ -1226,7 +1106,7 @@ int main(int argc, char *argv[]) {
     for(i = 0; i < NUM_PORTS; ++i) {
         sockets[i] = open_sock(ports[i][0], ports[i][1]);
 
-        if(!sockets[i]) {
+        if(sockets[i] < 0) {
             debug(DBG_ERROR, "Error opening port %d (%s), exiting\n",
                   ports[i][1], ports[i][0] == AF_INET ? "IPv4" : "IPv6");
             exit(EXIT_FAILURE);
@@ -1235,6 +1115,9 @@ int main(int argc, char *argv[]) {
 
     /* Enter the main connection handling loop. */
     handle_connections(sockets);
+
+    /* Clean up after ourselves... */
+    patch_free_config(cfg);
 
     return 0;
 }
