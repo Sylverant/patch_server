@@ -116,7 +116,9 @@ static int handle_welcome(xmlNode *n, patch_config_t *cfg) {
     ICONV_CONST char *inptr;
     char *outptr;
     char buf[4096];
+    char buf2[4096];
     uint16_t *tmp;
+    int i;
 
     /* Make the converting context */
     ic = iconv_open("UTF-16LE", "UTF-8");
@@ -153,9 +155,25 @@ static int handle_welcome(xmlNode *n, patch_config_t *cfg) {
     /* Grab the message from the node */
     if((msg = xmlNodeListGetString(n->doc, n->children, 1))) {
         /* Convert the message to UTF-16LE */
-        in = (size_t)xmlStrlen(msg);
-        out = 4094;
+        in = (size_t)xmlStrlen(msg) + 1;
         inptr = (ICONV_CONST char *)msg;
+
+        if(ispc) {
+            outptr = buf2;
+
+            for(i = 0; i < in && i < 2048; ++i) {
+                if(msg[i] == '\n' && (!i || msg[i - 1] != '\r')) {
+                    *outptr++ = '\r';
+                }
+
+                *outptr++ = msg[i];
+            }
+
+            in = (size_t)strlen(buf2) + 1;
+            inptr = (ICONV_CONST char *)buf2;
+        }
+
+        out = 4094;
         outptr = buf;
         iconv(ic, &inptr, &in, &outptr, &out);
 
