@@ -250,8 +250,16 @@ static int send_file_list(patch_client_t *c, struct file_queue *q) {
 
     /* Loop through each patch file, sending the appropriate packets for it. */
     TAILQ_FOREACH(i, q, qentry) {
-        bn = strrchr(i->filename, '/') + 1;
-        dlen = strlen(i->filename) - strlen(bn) - 1;
+        bn = strrchr(i->filename, '/');
+
+        if(bn) {
+            bn += 1;
+            dlen = strlen(i->filename) - strlen(bn) - 1;
+        }
+        else {
+            dlen = 0;
+            bn = i->filename;
+        }
 
         /* Copy over the directory that the file exists in. */
         strncpy(dir2, i->filename, dlen);
@@ -307,6 +315,7 @@ static patch_file_t *fetch_patch(uint32_t idx, struct file_queue *q) {
 static int store_file(patch_client_t *c, patch_file_info_reply *pkt) {
     patch_cfile_t *n;
     patch_file_t *f;
+    patch_file_entry_t *ent;
 
     if(c->type == CLIENT_TYPE_PC_DATA) {
         f = fetch_patch(LE32(pkt->patch_id), &cfg->pc_files);
@@ -320,19 +329,51 @@ static int store_file(patch_client_t *c, patch_file_info_reply *pkt) {
     }
 
     /* Add it to the list only if we need to send it. */
-    if(f->checksum != LE32(pkt->checksum) || f->size != LE32(pkt->size)){
-        n = (patch_cfile_t *)malloc(sizeof(patch_cfile_t));
+    if(f->flags & PATCH_FLAG_NO_IF) {
+        /* With a single entry, this is easy... */
+        if(f->entries->checksum != LE32(pkt->checksum) ||
+           f->entries->size != LE32(pkt->size)) {
+            n = (patch_cfile_t *)malloc(sizeof(patch_cfile_t));
 
-        if(!n) {
-            perror("malloc");
-            return -1;
+            if(!n) {
+                perror("malloc");
+                return -1;
+            }
+
+            /* Store the file info. */
+            n->file = f;
+            n->ent = f->entries;
+
+            /* Add it to the list. */
+            TAILQ_INSERT_TAIL(&c->files, n, qentry);
         }
+    }
+    else {
+        ent = f->entries;
 
-        /* Store the file info. */
-        n->file = f;
+        while(ent) {
+            if(ent->client_checksum == LE32(pkt->checksum) ||
+               ((f->flags & PATCH_FLAG_HAS_ELSE) && !ent->next &&
+                 (ent->checksum != LE32(pkt->checksum) ||
+                  ent->size != LE32(pkt->size)))) {
+                n = (patch_cfile_t *)malloc(sizeof(patch_cfile_t));
 
-        /* Add it to the list. */
-        TAILQ_INSERT_TAIL(&c->files, n, qentry);
+                if(!n) {
+                    perror("malloc");
+                    return -1;
+                }
+
+                /* Store the file info. */
+                n->file = f;
+                n->ent = ent;
+
+                /* Add it to the list. */
+                TAILQ_INSERT_TAIL(&c->files, n, qentry);
+                break;
+            }
+
+            ent = ent->next;
+        }
     }
 
     return 0;
@@ -358,7 +399,7 @@ static int handle_list_done(patch_client_t *c) {
         /* Look through the list, and tabulate the data we need to send. */
         TAILQ_FOREACH(i, &c->files, qentry) {
             ++files;
-            size += i->file->size;
+            size += i->ent->size;
         }
 
         /* Send the informational packet telling about what we're sending. */
@@ -383,8 +424,17 @@ static int handle_list_done(patch_client_t *c) {
         strcpy(dir, "");
     }
     else if(c->sending_data == 2) {
-        bn = strrchr(i->file->filename, '/') + 1;
-        dlen = strlen(i->file->filename) - strlen(bn) - 1;
+        bn = strrchr(i->file->filename, '/');
+
+        if(bn) {
+            bn += 1;
+            dlen = strlen(i->file->filename) - strlen(bn) - 1;
+        }
+        else {
+            bn = i->file->filename;
+            dlen = 0;
+        }
+
         strncpy(dir, i->file->filename, dlen);
         dir[dlen] = 0;
 
@@ -398,8 +448,16 @@ static int handle_list_done(patch_client_t *c) {
     }
     /* If we're just starting on a file, change the directory if appropriate. */
     if(c->sending_data < 3 && i) {
-        bn = strrchr(i->file->filename, '/') + 1;
-        dlen = strlen(i->file->filename) - strlen(bn) - 1;
+        bn = strrchr(i->file->filename, '/');
+
+        if(bn) {
+            bn += 1;
+            dlen = strlen(i->file->filename) - strlen(bn) - 1;
+        }
+        else {
+            bn = i->file->filename;
+            dlen = 0;
+        }
 
         /* Copy over the directory that the file exists in. */
         strncpy(dir2, i->file->filename, dlen);
@@ -413,17 +471,17 @@ static int handle_list_done(patch_client_t *c) {
         c->sending_data = 3;
 
         /* Send the file header. */
-        return send_file_send(c, i->file->size, bn);
+        return send_file_send(c, i->ent->size, bn);
     }
 
     /* If we've got this far and we have a file to send still, send the current
        chunk of the file. */
     if(i) {
         if(c->type == CLIENT_TYPE_PC_DATA) {
-            dlen = send_file_chunk(c, i->file->server_filename, cfg->pc_dir);
+            dlen = send_file_chunk(c, i->ent->filename, cfg->pc_dir);
         }
         else {
-            dlen = send_file_chunk(c, i->file->server_filename, cfg->bb_dir);
+            dlen = send_file_chunk(c, i->ent->filename, cfg->bb_dir);
         }
 
         if(dlen < 0) {

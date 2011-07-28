@@ -36,6 +36,21 @@
 
 #define XC (const xmlChar *)
 
+static void patch_free_entry(patch_file_t *e) {
+    patch_file_entry_t *ent, *tmp;
+
+    ent = e->entries;
+    while(ent) {
+        tmp = ent->next;
+        xmlFree(ent->filename);
+        free(ent);
+        ent = tmp;
+    }
+
+    xmlFree(e->filename);
+    free(e);
+}
+
 static int handle_server(xmlNode *n, patch_config_t *cur) {
     xmlChar *ip, *ip6;
     int rv;
@@ -223,18 +238,18 @@ static int handle_clientfile(xmlNode *n, patch_file_t *f) {
     return 0;
 }
 
-static int handle_file(xmlNode *n, patch_file_t *f) {
+static int handle_file(xmlNode *n, patch_file_entry_t *f) {
     xmlChar *fn;
 
     /* Grab the long description from the node */
     if((fn = xmlNodeListGetString(n->doc, n->children, 1))) {
-        f->server_filename = (char *)fn;
+        f->filename = (char *)fn;
     }
 
     return 0;
 }
 
-static int handle_checksum(xmlNode *n, patch_file_t *f) {
+static int handle_checksum(xmlNode *n, patch_file_entry_t *f) {
     xmlChar *csum;
     int rv = 0;
 
@@ -254,7 +269,7 @@ static int handle_checksum(xmlNode *n, patch_file_t *f) {
     return rv;
 }
 
-static int handle_size(xmlNode *n, patch_file_t *f) {
+static int handle_size(xmlNode *n, patch_file_entry_t *f) {
     xmlChar *size;
     int rv = 0;
 
@@ -274,10 +289,100 @@ static int handle_size(xmlNode *n, patch_file_t *f) {
     return rv;
 }
 
+static int handle_entry(xmlNode *n, patch_file_entry_t *ent, int cksum) {
+    int have_file = 0, have_checksum = 0, have_size = 0;
+    xmlChar *checksum;
+
+    if(cksum) {
+        checksum = xmlGetProp(n, XC"checksum");
+
+        if(!checksum) {
+            debug(DBG_ERROR, "Checksum required for if on line %hu\n", n->line);
+            return -1;
+        }
+
+        errno = 0;
+        ent->client_checksum = (uint32_t)strtoul((char *)checksum, NULL, 16);
+        
+        if(errno) {
+            debug(DBG_ERROR, "Invalid checksum for patch on line %hu: %s\n",
+                  n->line, (char *)checksum);
+            xmlFree(checksum);
+            return -2;
+        }
+
+        xmlFree(checksum);
+    }
+
+    /* Now that we're done with that, deal with any children of the node */
+    n = n->children;
+    while(n) {
+        if(n->type != XML_ELEMENT_NODE) {
+            /* Ignore non-elements. */
+            n = n->next;
+            continue;
+        }
+        else if(!xmlStrcmp(n->name, XC"file")) {
+            if(have_file) {
+                debug(DBG_ERROR, "Duplicate server filename for patch on line"
+                      "%hu\n", n->line);
+                return -3;
+            }
+
+            if(handle_file(n, ent)) {
+                return -4;
+            }
+
+            have_file = 1;
+        }
+        else if(!xmlStrcmp(n->name, XC"checksum")) {
+            if(have_checksum) {
+                debug(DBG_ERROR, "Duplicate checksum for patch on line %hu\n",
+                      n->line);
+                return -5;
+            }
+
+            if(handle_checksum(n, ent)) {
+                return -6;
+            }
+
+            have_checksum = 1;
+        }
+        else if(!xmlStrcmp(n->name, XC"size")) {
+            if(have_size) {
+                debug(DBG_ERROR, "Duplicate size for patch on line %hu\n",
+                      n->line);
+                return -7;
+            }
+
+            if(handle_size(n, ent)) {
+                return -8;
+            }
+
+            have_size = 1;
+        }
+        else {
+            debug(DBG_WARN, "Invalid Tag %s on line %hu\n", (char *)n->name,
+                  n->line);
+        }
+
+        n = n->next;
+    }
+
+    /* If we got this far, make sure we got all the required attributes */
+    if(!have_file || !have_checksum || !have_size) {
+        debug(DBG_ERROR, "One or more required attributes not set for patch\n");
+        return -9;
+    }
+
+    return 0;
+}
+
 static int handle_patch(xmlNode *n, struct file_queue *q) {
     xmlChar *enabled;
     int rv;
     patch_file_t *file = NULL;
+    patch_file_entry_t *ent, *ent2;
     int have_cfile = 0, have_file = 0, have_checksum = 0, have_size = 0;
 
     /* Grab the attributes we're expecting */
@@ -307,6 +412,19 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
 
     memset(file, 0, sizeof(patch_file_t));
 
+    /* Allocate space for the first entry... */
+    ent = (patch_file_entry_t *)malloc(sizeof(patch_file_entry_t));
+    if(!ent) {
+        debug(DBG_ERROR, "Cannot allocate space for patch entry\n",
+              "%s\n", strerror(errno));
+        rv = -11;
+        goto err;
+    }
+
+    memset(ent, 0, sizeof(patch_file_entry_t));
+
+    file->entries = ent;
+
     /* Now that we're done with that, deal with any children of the node */
     n = n->children;
     while(n) {
@@ -331,6 +449,14 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
             have_cfile = 1;
         }
         else if(!xmlStrcmp(n->name, XC"file")) {
+            if((file->flags & PATCH_FLAG_HAS_IF)) {
+                debug(DBG_ERROR, "Invalid file tag on line %hu\n", n->line);
+                rv = -18;
+                goto err;
+            }
+
+            file->flags |= PATCH_FLAG_NO_IF;
+
             if(have_file) {
                 debug(DBG_ERROR, "Duplicate server filename for patch on line"
                       "%hu\n", n->line);
@@ -338,7 +464,7 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
                 goto err;
             }
 
-            if(handle_file(n, file)) {
+            if(handle_file(n, ent)) {
                 rv = -6;
                 goto err;
             }
@@ -346,6 +472,14 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
             have_file = 1;
         }
         else if(!xmlStrcmp(n->name, XC"checksum")) {
+            if((file->flags & PATCH_FLAG_HAS_IF)) {
+                debug(DBG_ERROR, "Invalid checksum tag on line %hu\n", n->line);
+                rv = -17;
+                goto err;
+            }
+
+            file->flags |= PATCH_FLAG_NO_IF;
+
             if(have_checksum) {
                 debug(DBG_ERROR, "Duplicate checksum for patch on line %hu\n",
                       n->line);
@@ -353,7 +487,7 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
                 goto err;
             }
 
-            if(handle_checksum(n, file)) {
+            if(handle_checksum(n, ent)) {
                 rv = -8;
                 goto err;
             }
@@ -361,6 +495,14 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
             have_checksum = 1;
         }
         else if(!xmlStrcmp(n->name, XC"size")) {
+            if((file->flags & PATCH_FLAG_HAS_IF)) {
+                debug(DBG_ERROR, "Invalid size tag on line %hu\n", n->line);
+                rv = -16;
+                goto err;
+            }
+
+            file->flags |= PATCH_FLAG_NO_IF;
+
             if(have_size) {
                 debug(DBG_ERROR, "Duplicate size for patch on line %hu\n",
                       n->line);
@@ -368,12 +510,74 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
                 goto err;
             }
 
-            if(handle_size(n, file)) {
+            if(handle_size(n, ent)) {
                 rv = -10;
                 goto err;
             }
 
             have_size = 1;
+        }
+        else if(!xmlStrcmp(n->name, XC"if")) {
+            if((file->flags & PATCH_FLAG_HAS_ELSE) ||
+               (file->flags & PATCH_FLAG_NO_IF)) {
+                debug(DBG_ERROR, "Invalid if tag on line %hu\n", n->line);
+                rv = -14;
+                goto err;
+            }
+
+            /* Set the flag to say we've seen an if tag */
+            file->flags |= PATCH_FLAG_HAS_IF;
+
+            /* Set up the new entry */
+            if(have_size) {
+                ent2 = (patch_file_entry_t *)malloc(sizeof(patch_file_entry_t));
+                if(!ent2) {
+                    debug(DBG_ERROR, "Cannot make space for entry on line %hu\n"
+                          "%s\n", n->line, strerror(errno));
+                    rv = -15;
+                    goto err;
+                }
+
+                memset(ent2, 0, sizeof(patch_file_entry_t));
+                ent->next = ent2;
+                ent = ent2;
+            }
+
+            if(handle_entry(n, ent, 1)) {
+                rv = -20;
+                goto err;
+            }
+
+            /* Set these so we don't trip later... */
+            have_size = have_checksum = have_file = 1;
+        }
+        else if(!xmlStrcmp(n->name, XC"else")) {
+            if((file->flags & PATCH_FLAG_HAS_ELSE) ||
+               !(file->flags & PATCH_FLAG_HAS_IF)) {
+                debug(DBG_ERROR, "Invalid else tag on line %hu\n", n->line);
+                rv = -12;
+                goto err;
+            }
+
+            /* Set the required flags and set up the entry... */
+            file->flags |= PATCH_FLAG_HAS_ELSE;
+
+            ent2 = (patch_file_entry_t *)malloc(sizeof(patch_file_entry_t));
+            if(!ent2) {
+                debug(DBG_ERROR, "Cannot make space for entry on line %hu\n"
+                      "%s\n", n->line, strerror(errno));
+                rv = -13;
+                goto err;
+            }
+
+            memset(ent2, 0, sizeof(patch_file_entry_t));
+            ent->next = ent2;
+            ent = ent2;
+
+            if(handle_entry(n, ent, 0)) {
+                rv = -19;
+                goto err;
+            }
         }
         else {
             debug(DBG_WARN, "Invalid Tag %s on line %hu\n", (char *)n->name,
@@ -396,9 +600,7 @@ static int handle_patch(xmlNode *n, struct file_queue *q) {
 
 err:
     if(rv && file) {
-        xmlFree(file->filename);
-        xmlFree(file->server_filename);
-        free(file);
+        patch_free_entry(file);
     }
 
     xmlFree(enabled);
@@ -608,10 +810,7 @@ void patch_free_config(patch_config_t *cfg) {
             tmp = TAILQ_NEXT(i, qentry);
 
             TAILQ_REMOVE(&cfg->pc_files, i, qentry);
-            xmlFree(i->filename);
-            xmlFree(i->server_filename);
-            free(i);
-
+            patch_free_entry(i);
             i = tmp;
         }
 
@@ -620,10 +819,7 @@ void patch_free_config(patch_config_t *cfg) {
             tmp = TAILQ_NEXT(i, qentry);
 
             TAILQ_REMOVE(&cfg->bb_files, i, qentry);
-            xmlFree(i->filename);
-            xmlFree(i->server_filename);
-            free(i);
-
+            patch_free_entry(i);
             i = tmp;
         }
 

@@ -39,21 +39,35 @@ typedef struct pkt_header {
 
 #undef PACKED
 
+typedef struct patch_file_entry {
+    char *filename;
+    uint32_t size;
+    uint32_t checksum;
+    uint32_t client_checksum;
+
+    struct patch_file_entry *next;
+} patch_file_entry_t;
+
 /* Patch file structure. */
 typedef struct patch_file {
     TAILQ_ENTRY(patch_file) qentry;
 
-    uint32_t size;
-    uint32_t checksum;
+    uint32_t flags;
     char *filename;
-    char *server_filename;
+
+    patch_file_entry_t *entries;
 } patch_file_t;
+
+#define PATCH_FLAG_HAS_IF       0x00000001
+#define PATCH_FLAG_HAS_ELSE     0x00000002
+#define PATCH_FLAG_NO_IF        0x00000004
 
 /* Client-side file structure. */
 typedef struct patch_cfile {
     TAILQ_ENTRY(patch_cfile) qentry;
 
     patch_file_t *file;
+    patch_file_entry_t *ent;
 } patch_cfile_t;
 
 TAILQ_HEAD(cfile_queue, patch_cfile);
