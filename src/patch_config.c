@@ -702,7 +702,7 @@ int patch_read_config(const char *fn, patch_config_t **cfg) {
     }
 
     /* Open the configuration file for reading. */
-    doc = xmlReadFile(fn, NULL, 0 /* XML_PARSE_DTDVALID */);
+    doc = xmlReadFile(fn, NULL, XML_PARSE_DTDVALID);
 
     if(!doc) {
         xmlParserError(cxt, "Error in parsing config\n");
