@@ -304,7 +304,7 @@ int send_file_chunk(patch_client_t *c, const char fn[], const char dir[]) {
         return -1;
     }
 
-    cks = crc32(sendbuf + PATCH_DATA_SEND_LENGTH, (int)sz);
+    cks = sylverant_crc32(sendbuf + PATCH_DATA_SEND_LENGTH, (int)sz);
     len = ((uint16_t)sz + PATCH_DATA_SEND_LENGTH);
 
     /* Round to a nice even 4-byte boundary. */
