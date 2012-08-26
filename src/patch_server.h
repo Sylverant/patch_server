@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009, 2011 Lawrence Sebald
+    Copyright (C) 2009, 2011, 2012 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -19,7 +19,7 @@
 #ifndef PATCH_SERVER_H
 #define PATCH_SERVER_H
 
-#include <inttypes.h>
+#include <stdint.h>
 #include <sys/queue.h>
 #include <netinet/in.h>
 
@@ -86,9 +86,8 @@ typedef struct patch_client {
     CRYPT_SETUP server_cipher;
 
     unsigned char *recvbuf;
-    int recvbuf_cur;
-    int recvbuf_size;
-    pkt_header_t pkt;
+    int pkt_cur;
+    int pkt_sz;
 
     unsigned char *sendbuf;
     int sendbuf_cur;

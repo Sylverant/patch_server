@@ -1,7 +1,7 @@
 /*
     Sylverant Patch Server
 
-    Copyright (C) 2009, 2010, 2011 Lawrence Sebald
+    Copyright (C) 2009, 2010, 2011, 2012 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -83,8 +83,6 @@ static const int ports[NUM_PORTS][3] = {
 };
 
 static patch_config_t *cfg;
-
-static unsigned char recvbuf[65536];
 
 static struct client_queue clients = TAILQ_HEAD_INITIALIZER(clients);
 static int client_count = 0;
@@ -724,96 +722,100 @@ static int process_data_packet(patch_client_t *c, pkt_header_t *pkt) {
 /* Read data from a client that is connected to either port. */
 static int read_from_client(patch_client_t *c) {
     ssize_t sz;
-    uint16_t pkt_sz;
-    int rv = 0;
-    unsigned char *rbp = recvbuf;
-    void *tmp;
+    int pkt_sz = c->pkt_sz, pkt_cur = c->pkt_cur, rv;
+    pkt_header_t tmp_hdr;
 
-    /* If we've got anything buffered, copy it out to the main buffer to make
-       the rest of this a bit easier. */
-    if(c->recvbuf_cur) {
-        memcpy(recvbuf, c->recvbuf, c->recvbuf_cur);
-        
-    }
-
-    /* Attempt to read, and if we don't get anything, punt. */
-    if((sz = recv(c->sock, recvbuf + c->recvbuf_cur, 65536 - c->recvbuf_cur,
-                  0)) <= 0) {
-        if(sz == -1) {
-            perror("recv");
-        }
-
-        return -1;
-    }
-
-    sz += c->recvbuf_cur;
-    c->recvbuf_cur = 0;
-
-    /* As long as what we have is long enough, decrypt it. */
-    if(sz >= 4) {
-        while(sz >= 4) {
-            /* Decrypt the packet header so we know what exactly we're looking
-               for, in terms of packet length. */
-            if(!c->pkt.pkt_type) {
-                memcpy(&c->pkt, rbp, 4);
-                CRYPT_CryptData(&c->client_cipher, &c->pkt, 4, 0);
-            }
-
-            pkt_sz = LE16(c->pkt.pkt_len);
-
-            /* Do we have the whole packet? */
-            if(sz >= (ssize_t)pkt_sz) {
-                /* Yes, we do, decrypt it. */
-                CRYPT_CryptData(&c->client_cipher, rbp + 4, pkt_sz - 4, 0);
-                memcpy(rbp, &c->pkt, 4);
-
-                /* Pass it onto the correct handler. */
-                if(c->type == CLIENT_TYPE_PC_PATCH ||
-                   c->type == CLIENT_TYPE_BB_PATCH) {
-                    rv = process_patch_packet(c, (pkt_header_t *)rbp);
-                }
-                else if(c->type == CLIENT_TYPE_PC_DATA ||
-                        c->type == CLIENT_TYPE_BB_DATA) {
-                    rv = process_data_packet(c, (pkt_header_t *)rbp);
-                }
-
-                rbp += pkt_sz;
-                sz -= pkt_sz;
-                c->pkt.pkt_type = c->pkt.pkt_len = 0;
-            }
-            else {
-                /* Nope, we're missing part, break out of the loop, and buffer
-                   the remaining data. */
-                break;
-            }
-        }
-    }
-
-    /* If we've still got something left here, buffer it for the next pass. */
-    if(sz) {
-        /* Reallocate the recvbuf for the client if its too small. */
-        if(c->recvbuf_size < sz) {
-            tmp = realloc(c->recvbuf, sz);
-
-            if(!tmp) {
-                perror("realloc");
+    if(!c->recvbuf) {
+        /* Read in a new header... */
+        if((sz = recv(c->sock, &tmp_hdr, 4, 0)) < 4) {
+            /* If we have an error, disconnect the client */
+            if(sz <= 0) {
+                if(sz == -1)
+                    debug(DBG_WARN, "recv: %s\n", strerror(errno));
                 return -1;
             }
 
-            c->recvbuf = (unsigned char *)tmp;
-            c->recvbuf_size = sz;
+            /* Otherwise, its just not all there yet, so punt for now... */
+            if(!(c->recvbuf = (unsigned char *)malloc(4))) {
+                debug(DBG_WARN, "malloc: %s\n", strerror(errno));
+                return -1;
+            }
+
+            /* Copy over what we did get */
+            memcpy(c->recvbuf, &tmp_hdr, sz);
+            c->pkt_cur = sz;
+            return 0;
+        }
+    }
+    /* This case should be exceedingly rare... */
+    else if(!pkt_sz) {
+        /* Try to finish reading the header */
+        if((sz = recv(c->sock, c->recvbuf + pkt_cur, 4 - pkt_cur,
+                      0)) < 4 - pkt_cur) {
+            /* If we have an error, disconnect the client */
+            if(sz <= 0) {
+                if(sz == -1)
+                    debug(DBG_WARN, "recv: %s\n", strerror(errno));
+                return -1;
+            }
+
+            /* Update the pointer... */
+            c->pkt_cur += sz;
+            return 0;
         }
 
-        memcpy(c->recvbuf, rbp, sz);
-        c->recvbuf_cur = sz;
-    }
-    else {
-        /* Free the buffer, if we've got nothing in it. */
+        /* We now have the whole header, so ready things for that */
+        memcpy(&tmp_hdr, c->recvbuf, 4);
+        c->pkt_cur = 0;
         free(c->recvbuf);
-        c->recvbuf = NULL;
-        c->recvbuf_size = 0;
     }
 
+    /* If we haven't decrypted the packet header, do so now, since we definitely
+       have the whole thing at this point. */
+    if(!pkt_sz) {
+        CRYPT_CryptData(&c->client_cipher, &tmp_hdr, 4, 0);
+        pkt_sz = LE16(tmp_hdr.pkt_len);
+        sz = pkt_sz & 0x0003 ? (pkt_sz & 0xFFFC) + 4 : pkt_sz;
+
+        /* Allocate space for the packet */
+        if(!(c->recvbuf = (unsigned char *)malloc(sz)))  {
+            debug(DBG_WARN, "malloc: %s\n", strerror(errno));
+            return -1;
+        }
+
+        c->pkt_sz = pkt_sz;
+        memcpy(c->recvbuf, &tmp_hdr, 4);
+        pkt_cur = c->pkt_cur = 4;
+    }
+
+    /* See if the rest of the packet is here... */
+    if((sz = recv(c->sock, c->recvbuf + pkt_cur, pkt_sz - pkt_cur,
+                  0)) < pkt_sz - pkt_cur) {
+        if(sz <= 0) {
+            if(sz == -1)
+                debug(DBG_WARN, "recv: %s\n", strerror(errno));
+            return -1;
+        }
+
+        /* Didn't get it all, return for now... */
+        c->pkt_cur += sz;
+        return 0;
+    }
+
+    /* If we get this far, we've got the whole packet, so process it. */
+    CRYPT_CryptData(&c->client_cipher, c->recvbuf + 4, pkt_sz - 4, 0);
+
+    /* Pass it onto the correct handler. */
+    if(c->type == CLIENT_TYPE_PC_PATCH || c->type == CLIENT_TYPE_BB_PATCH) {
+        rv = process_patch_packet(c, (pkt_header_t *)c->recvbuf);
+    }
+    else if(c->type == CLIENT_TYPE_PC_DATA || c->type == CLIENT_TYPE_BB_DATA) {
+        rv = process_data_packet(c, (pkt_header_t *)c->recvbuf);
+    }
+
+    free(c->recvbuf);
+    c->recvbuf = NULL;
+    c->pkt_cur = c->pkt_sz = 0;
     return rv;
 }
 
@@ -1071,10 +1073,10 @@ static int open_sock(int family, uint16_t port) {
     }
 
     if(family == PF_INET) {
+        memset(&addr, 0, sizeof(struct sockaddr));
         addr.sin_family = family;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
-        memset(addr.sin_zero, 0, 8);
 
         if(bind(sock, (struct sockaddr *)&addr, sizeof(struct sockaddr_in))) {
             perror("bind");
@@ -1099,7 +1101,6 @@ static int open_sock(int family, uint16_t port) {
         }
 
         memset(&addr6, 0, sizeof(struct sockaddr_in6));
-
         addr6.sin6_family = family;
         addr6.sin6_addr = in6addr_any;
         addr6.sin6_port = htons(port);
