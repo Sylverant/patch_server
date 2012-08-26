@@ -89,6 +89,7 @@ static int handle_server(xmlNode *n, patch_config_t *cur) {
     rv = 0;
 
 err:
+    xmlFree(ip6);
     xmlFree(ip);
     return rv;
 }
@@ -118,6 +119,7 @@ static int handle_versions(xmlNode *n, patch_config_t *cfg) {
     }
 
 err:
+    xmlFree(bb);
     xmlFree(pc);
     return rv;
 }
