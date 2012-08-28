@@ -785,7 +785,10 @@ static int read_from_client(patch_client_t *c) {
 
         c->pkt_sz = pkt_sz;
         memcpy(c->recvbuf, &tmp_hdr, 4);
-        pkt_cur = c->pkt_cur = 4;
+        c->pkt_cur = 4;
+
+        /* Return now, so we don't end up sleeping in the recv below. */
+        return 0;
     }
 
     /* See if the rest of the packet is here... */
@@ -1073,7 +1076,7 @@ static int open_sock(int family, uint16_t port) {
     }
 
     if(family == PF_INET) {
-        memset(&addr, 0, sizeof(struct sockaddr));
+        memset(&addr, 0, sizeof(struct sockaddr_in));
         addr.sin_family = family;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(port);
