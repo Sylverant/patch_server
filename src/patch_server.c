@@ -775,7 +775,7 @@ static int read_from_client(patch_client_t *c) {
     if(!pkt_sz) {
         CRYPT_CryptData(&c->client_cipher, &tmp_hdr, 4, 0);
         pkt_sz = LE16(tmp_hdr.pkt_len);
-        sz = pkt_sz & 0x0003 ? (pkt_sz & 0xFFFC) + 4 : pkt_sz;
+        sz = (pkt_sz & 0x0003) ? (pkt_sz & 0xFFFC) + 4 : pkt_sz;
 
         /* Allocate space for the packet */
         if(!(c->recvbuf = (unsigned char *)malloc(sz)))  {
@@ -786,6 +786,10 @@ static int read_from_client(patch_client_t *c) {
         c->pkt_sz = pkt_sz;
         memcpy(c->recvbuf, &tmp_hdr, 4);
         c->pkt_cur = 4;
+
+        /* If this packet is only a header, short-circuit and process it now. */
+        if(pkt_sz == 4)
+            goto process;
 
         /* Return now, so we don't end up sleeping in the recv below. */
         return 0;
@@ -808,6 +812,7 @@ static int read_from_client(patch_client_t *c) {
     /* If we get this far, we've got the whole packet, so process it. */
     CRYPT_CryptData(&c->client_cipher, c->recvbuf + 4, pkt_sz - 4, 0);
 
+process:
     /* Pass it onto the correct handler. */
     if(c->type == CLIENT_TYPE_PC_PATCH || c->type == CLIENT_TYPE_BB_PATCH) {
         rv = process_patch_packet(c, (pkt_header_t *)c->recvbuf);
