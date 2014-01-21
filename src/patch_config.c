@@ -1,7 +1,7 @@
 /*
     This file is part of Sylverant Patch Server.
 
-    Copyright (C) 2009, 2010, 2011, 2012 Lawrence Sebald
+    Copyright (C) 2009, 2010, 2011, 2012, 2014 Lawrence Sebald
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License version 3
@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <iconv.h>
+#include <errno.h>
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
