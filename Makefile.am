@@ -1,7 +1,7 @@
 #  
 #   This file is part of Sylverant PSO Server.
 #  
-#   Copyright (C) 2009, 2011 Lawrence Sebald
+#   Copyright (C) 2009, 2011, 2014 Lawrence Sebald
 #  
 #   This program is free software: you can redistribute it and/or modify
 #   it under the terms of the GNU Affero General Public License version 3
@@ -16,6 +16,8 @@
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ACLOCAL_AMFLAGS = -I m4
+
+LIBS += $(LIBICONV)
 
 bin_PROGRAMS = patch_server
 patch_server_SOURCES = src/patch_packets.c src/patch_packets.h \
