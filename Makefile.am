@@ -1,8 +1,8 @@
-#  
+#
 #   This file is part of Sylverant PSO Server.
-#  
-#   Copyright (C) 2009, 2011, 2014 Lawrence Sebald
-#  
+#
+#   Copyright (C) 2009, 2011, 2014, 2018 Lawrence Sebald
+#
 #   This program is free software: you can redistribute it and/or modify
 #   it under the terms of the GNU Affero General Public License version 3
 #   as published by the Free Software Foundation.
@@ -23,5 +23,10 @@ bin_PROGRAMS = patch_server
 patch_server_SOURCES = src/patch_packets.c src/patch_packets.h \
                        src/patch_server.c src/patch_server.h \
                        src/patch_config.c
+
+if NEED_PIDFILE
+AM_CFLAGS = -DNEED_PIDFILE=1
+patch_server_SOURCES += src/pidfile.c
+endif
 
 datarootdir = @datarootdir@

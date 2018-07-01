@@ -1,7 +1,7 @@
 dnl
 dnl This file is part of Sylverant PSO Server.
 dnl
-dnl Copyright (C) 2009, 2011 Lawrence Sebald
+dnl Copyright (C) 2009, 2011, 2018 Lawrence Sebald
 dnl
 dnl This program is free software: you can redistribute it and/or modify
 dnl it under the terms of the GNU Affero General Public License version 3
@@ -40,12 +40,17 @@ LIBS="$LIBS $libxml2_LIBS"
 
 AC_CHECK_LIB([sylverant], [sylverant_read_config], , AC_MSG_ERROR([libsylverant is required!]))
 
+AC_SEARCH_LIBS([pidfile_open], [util bsd], [NEED_PIDFILE=0], [NEED_PIDFILE=1])
+
 # Figure out iconv-related stuff
 AM_ICONV
 AM_ICONV_LINK
 
+AM_CONDITIONAL([NEED_PIDFILE], [test "$NEED_PIDFILE" -eq 1])
+
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h])
+AC_CHECK_HEADERS([libutil.h bsd/libutil.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_TYPE_OFF_T
@@ -56,9 +61,7 @@ AC_TYPE_UINT8_T
 AC_C_BIGENDIAN
 
 # Checks for library functions.
-AC_FUNC_MALLOC
-AC_FUNC_REALLOC
-AC_CHECK_FUNCS([inet_ntoa memmove memset select socket strdup strrchr])
+AC_CHECK_FUNCS([malloc realloc inet_ntoa memmove memset select socket strdup strrchr])
 
 ADD_CFLAGS([-Wall])
 
