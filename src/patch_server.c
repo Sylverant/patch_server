@@ -38,6 +38,7 @@
 #include <limits.h>
 #include <setjmp.h>
 #include <pwd.h>
+#include <grp.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -1264,6 +1265,8 @@ static int drop_privs(void) {
     struct passwd *pw;
     uid_t uid;
     gid_t gid;
+    int gid_count = 0;
+    gid_t *groups;
 
     /* Make sure we're actually root, otherwise some of this will fail. */
     if(getuid() && geteuid())
@@ -1279,11 +1282,34 @@ static int drop_privs(void) {
         return -1;
     }
 
-    /* Set privileges. */
+#ifdef HAVE_GETGROUPLIST
+    /* Figure out what other groups the user is in... */
+    getgrouplist(runas_user, gid, NULL, &gid_count);
+    if(!(groups = malloc(gid_count * sizeof(gid_t)))) {
+        perror("malloc");
+        return -1;
+    }
+
+    if(getgrouplist(runas_user, gid, groups, &gid_count)) {
+        perror("getgrouplist");
+        free(groups);
+        return -1;
+    }
+
+    if(setgroups(gid_count, groups)) {
+        perror("setgroups");
+        free(groups);
+        return -1;
+    }
+
+    /* We're done with most of these, so clear this out now... */
+    free(groups);
+#else
     if(setgroups(1, &gid)) {
         perror("setgroups");
         return -1;
     }
+#endif
 
     if(setgid(gid)) {
         perror("setgid");

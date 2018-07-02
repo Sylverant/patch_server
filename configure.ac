@@ -49,7 +49,7 @@ AM_ICONV_LINK
 AM_CONDITIONAL([NEED_PIDFILE], [test "$NEED_PIDFILE" -eq 1])
 
 # Checks for header files.
-AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h])
+AC_CHECK_HEADERS([arpa/inet.h fcntl.h inttypes.h limits.h netinet/in.h stdlib.h string.h sys/socket.h sys/time.h unistd.h pwd.h grp.h])
 AC_CHECK_HEADERS([libutil.h bsd/libutil.h])
 
 # Checks for typedefs, structures, and compiler characteristics.
@@ -61,7 +61,7 @@ AC_TYPE_UINT8_T
 AC_C_BIGENDIAN
 
 # Checks for library functions.
-AC_CHECK_FUNCS([malloc realloc inet_ntoa memmove memset select socket strdup strrchr])
+AC_CHECK_FUNCS([malloc realloc inet_ntoa memmove memset select socket strdup strrchr getgrouplist])
 
 ADD_CFLAGS([-Wall])
 
