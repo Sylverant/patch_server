@@ -1249,7 +1249,7 @@ static void install_signal_handlers() {
     sigemptyset(&sa.sa_mask);
     sa.sa_handler = NULL;
     sa.sa_sigaction = &sigusr1_hnd;
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
 
     if(sigaction(SIGUSR1, &sa, NULL) < 0) {
         perror("sigaction");
